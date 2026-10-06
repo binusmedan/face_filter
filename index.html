@@ -141,6 +141,20 @@
             FACE_LERP: 0.55,
             HAND_LERP: 0.6,
             FACE_TIMEOUT: 700,      // ms aksesoris tetap tampil saat wajah hilang sebentar
+            MAX_FACES: 8,           // jumlah wajah maksimum per deteksi full frame
+            MAX_TRACKS: 12,         // total wajah yang dilacak (dekat + jauh)
+            MAX_HANDS: 4,           // jumlah tangan (2 orang bisa membuat gesture bergantian)
+            // ---- Deteksi wajah jauh / ramai (tiled multi-scale inference) ----
+            CAMERA_W: 1920,         // resolusi kamera lebih tinggi = wajah jauh punya lebih banyak piksel
+            CAMERA_H: 1080,
+            FAR_DETECTION: true,
+            SCAN_TILES: [0.5, 0.3], // ukuran tile scan (x lebar video). 0.3 = zoom ~3.3x untuk wajah sangat jauh
+            CROP_SIZE: 320,         // resolusi crop yang dikirim ke model
+            FAR_TRACK_ZOOM: 3.2,    // crop pelacak = lebar wajah x nilai ini
+            CROPS_PER_FRAME: 3,     // maks crop per frame (otomatis turun kalau FPS berat)
+            VISION_BUDGET_MS: 28,   // target waktu deteksi per frame; lebih dari ini -> crop dikurangi
+            FACE_CONFIRM_HITS: 2,   // wajah baru tampil setelah terdeteksi 2x (buang false positive)
+            FACE_NMS: 0.5,          // dua track lebih dekat dari ini (x lebar wajah) = wajah yang sama, digabung
             // Sign F -> confetti + tulisan BINUS
             F_EYE_CLEAR: 1.3,       // lingkaran jempol-telunjuk harus sejauh ini dari mata (x jarak mata), supaya beda dari gesture kacamata
             PARTY_DURATION: 5000,   // ms tulisan tampil setelah sign F (diperpanjang selama sign F ditahan)
@@ -878,11 +892,11 @@
         }
 
         // ================== FACE TRACKING ==================
-        let face = null, faceTime = 0;
+        // Banyak wajah: tiap wajah punya "track" sendiri (dicocokkan ke wajah terdekat di frame sebelumnya)
+        let faceTracks = [];            // [{ id, pts, time, heartAcc }]
+        let nextFaceId = 1;
 
-        function updateFace(res) {
-            const lm = res && res.faceLandmarks && res.faceLandmarks[0];
-            if (!lm) return;
+        function rawFace(lm) {
             const P = i => toScreen(lm[i]);
             // Setelah mirror: mata kanan subjek (33/133) tampil di kanan layar
             const raw = { eL: mid(P(362), P(263)), eR: mid(P(33), P(133)), top: P(10), sL: P(454), sR: P(234), nose: P(1), chin: P(152) };
@@ -890,18 +904,69 @@
                 [raw.eL, raw.eR] = [raw.eR, raw.eL];
                 [raw.sL, raw.sR] = [raw.sR, raw.sL];
             }
-            const now = performance.now();
-            if (!face || now - faceTime > CFG.FACE_TIMEOUT) face = raw;
-            else Object.keys(raw).forEach(k => {
-                face[k].x += (raw[k].x - face[k].x) * CFG.FACE_LERP;
-                face[k].y += (raw[k].y - face[k].y) * CFG.FACE_LERP;
-            });
-            faceTime = now;
+            return raw;
         }
 
-        function faceGeom() {
-            if (!face || performance.now() - faceTime > CFG.FACE_TIMEOUT) return null;
-            const f = face;
+        // lmsList = daftar landmark (ternormalisasi ke full video), src = 'full' | 'crop'
+        function updateFaces(lmsList, src) {
+            const now = performance.now();
+            const raws = lmsList.map(rawFace);
+            const used = new Set();
+            raws.forEach(raw => {
+                const c = mid(raw.eL, raw.eR), size = D(raw.sL, raw.sR) || 1;
+                let best = null, bd = Infinity;
+                faceTracks.forEach(t => {
+                    if (used.has(t) || now - t.time > CFG.FACE_TIMEOUT) return;
+                    const d = D(mid(t.pts.eL, t.pts.eR), c);
+                    if (d < bd) { bd = d; best = t; }
+                });
+                if (best && bd < size * 0.7) {
+                    Object.keys(raw).forEach(k => {
+                        best.pts[k].x += (raw[k].x - best.pts[k].x) * CFG.FACE_LERP;
+                        best.pts[k].y += (raw[k].y - best.pts[k].y) * CFG.FACE_LERP;
+                    });
+                    best.time = now;
+                    best.hits++;
+                    if (src === 'full') best.fullTime = now;
+                    used.add(best);
+                } else if (faceTracks.length < CFG.MAX_TRACKS) {
+                    const t = { id: nextFaceId++, pts: raw, time: now, hits: 1, fullTime: src === 'full' ? now : 0, heartAcc: 0 };
+                    faceTracks.push(t);
+                    used.add(t);
+                }
+            });
+            faceTracks = faceTracks.filter(t => now - t.time <= CFG.FACE_TIMEOUT);
+            mergeDuplicateTracks();
+        }
+
+        // NMS antar track: deteksi dari full frame + tile + crop bisa menghasilkan 2 track untuk 1 wajah
+        function mergeDuplicateTracks() {
+            const center = t => mid(t.pts.eL, t.pts.eR);
+            const width = t => D(t.pts.sL, t.pts.sR) || 1;
+            for (let i = 0; i < faceTracks.length; i++) {
+                for (let j = faceTracks.length - 1; j > i; j--) {
+                    const a = faceTracks[i], b = faceTracks[j];
+                    if (D(center(a), center(b)) > Math.max(width(a), width(b)) * CFG.FACE_NMS) continue;
+                    // Pertahankan track yang lebih "mapan" (lebih banyak hit), gabungkan waktu terakhir terlihat
+                    const [keep, drop] = a.hits >= b.hits ? [a, b] : [b, a];
+                    keep.hits += drop.hits;
+                    keep.time = Math.max(keep.time, drop.time);
+                    keep.fullTime = Math.max(keep.fullTime, drop.fullTime);
+                    faceTracks.splice(faceTracks.indexOf(drop), 1);
+                    if (drop === a) { i--; break; }
+                }
+            }
+        }
+
+        // Geometri semua wajah yang aktif DAN sudah terkonfirmasi (bukan false positive sesaat)
+        function faceGeoms() {
+            const now = performance.now();
+            return faceTracks
+                .filter(t => now - t.time <= CFG.FACE_TIMEOUT && (t.hits >= CFG.FACE_CONFIRM_HITS || t.fullTime))
+                .map(t => ({ ...faceGeom(t.pts), id: t.id, track: t }));
+        }
+
+        function faceGeom(f) {
             const angle = Math.atan2(f.eR.y - f.eL.y, f.eR.x - f.eL.x);
             const ux = Math.cos(angle), uy = Math.sin(angle);
             const width = D(f.sL, f.sR);
@@ -920,11 +985,19 @@
         }
 
         // ================== GESTURE DETECTION ==================
-        function detectGesture(fg) {
-            const g2 = hands.length >= 2 ? detectTwoHand(fg) : null;
-            if (g2) return g2;
-            return detectFSign(fg) || detectPeace();
+        // faces = semua wajah aktif. Gesture dua tangan dicek untuk setiap pasangan tangan (bisa ada beberapa orang).
+        function detectGesture(faces) {
+            for (let i = 0; i < hands.length; i++) {
+                for (let j = i + 1; j < hands.length; j++) {
+                    const g2 = detectTwoHand(hands[i], hands[j], faces);
+                    if (g2) return g2;
+                }
+            }
+            return detectFSign(faces) || detectPeace();
         }
+
+        const nearEyes = (pt, f, k) => D(pt, f.eL) < f.eye * k || D(pt, f.eR) < f.eye * k;
+        const handPt = h => ({ x: h.cx, y: h.cy });
 
         // Peace sign satu tangan -> rekam video (hanya saat tidak sedang merekam / modal tertutup)
         function detectPeace() {
@@ -935,24 +1008,30 @@
 
         // Sign F satu tangan. Bentuknya sama dengan tanda OK untuk kacamata, jadi syaratnya:
         // wajah terlihat, lingkaran jari jauh dari mata, dan tangan lain tidak sedang membuat tanda OK.
-        function detectFSign(fg) {
-            if (!fg) return null;
-            const f = hands.filter(h => h.fSign &&
-                D(h.okCenter, fg.eL) > fg.eye * CFG.F_EYE_CLEAR && D(h.okCenter, fg.eR) > fg.eye * CFG.F_EYE_CLEAR);
-            if (f.length !== 1) return null;
-            if (hands.some(h => h !== f[0] && h.ok)) return null;
-            return { type: 'binus', x: f[0].cx, y: f[0].cy };
+        function detectFSign(faces) {
+            if (!faces.length) return null;
+            for (const h of hands) {
+                if (!h.fSign || faces.some(f => nearEyes(h.okCenter, f, CFG.F_EYE_CLEAR))) continue;
+                // Tangan lain di dekatnya juga membuat OK -> kemungkinan sedang membentuk kacamata
+                if (hands.some(o => o !== h && o.ok && D(handPt(o), handPt(h)) < h.size * 5)) continue;
+                // Wajah terdekat dengan tangan ini = pemilik tulisan BINUS
+                let owner = faces[0], bd = Infinity;
+                faces.forEach(f => { const d = D(handPt(h), { x: f.cx, y: f.cy }) / f.head; if (d < bd) { bd = d; owner = f; } });
+                return { type: 'binus', x: h.cx, y: h.cy, faceId: owner.id };
+            }
+            return null;
         }
 
-        function detectTwoHand(fg) {
-            const [A, B] = hands[0].cx < hands[1].cx ? [hands[0], hands[1]] : [hands[1], hands[0]];   // A = kiri layar, B = kanan layar
+        function detectTwoHand(h1, h2, faces) {
+            const [A, B] = h1.cx < h2.cx ? [h1, h2] : [h2, h1];   // A = kiri layar, B = kanan layar
             const s = (A.size + B.size) / 2;
 
-            // 1. Kacamata: dua tanda OK di depan mata
+            // 1. Kacamata: dua tanda OK di depan kedua mata salah satu wajah
             if (A.ok && B.ok) {
                 const ca = A.okCenter, cb = B.okCenter;
                 let near = Math.abs(ca.y - cb.y) < s * 0.8 && D(ca, cb) > s * 0.6;
-                if (near && fg) near = D(ca, fg.eL) < fg.eye * CFG.GLASSES_EYE_DIST && D(cb, fg.eR) < fg.eye * CFG.GLASSES_EYE_DIST;
+                if (near && faces.length) near = faces.some(f =>
+                    D(ca, f.eL) < f.eye * CFG.GLASSES_EYE_DIST && D(cb, f.eR) < f.eye * CFG.GLASSES_EYE_DIST);
                 if (near) return { type: 'glasses', ...mid(ca, cb) };
             }
 
@@ -970,7 +1049,8 @@
                 return { type: straight >= CFG.STRAIGHT ? 'hat' : 'hearts', ...mid(topPt, thumbPt) };
             }
 
-            // 4. Ganti style: satu tangan kepal, satu terbuka
+            // 4. Ganti style: satu tangan kepal, satu terbuka (harus berdekatan = tangan orang yang sama)
+            if (Math.abs(A.cy - B.cy) > s * 3 || B.cx - A.cx > s * 7) return null;
             if (B.fist && A.open) return { type: 'next', x: B.cx, y: B.cy };
             if (A.fist && B.open) return { type: 'prev', x: A.cx, y: A.cy };
             return null;
@@ -991,14 +1071,14 @@
             if (g.type !== gest.hold) { gest.hold = g.type; gest.time = 0; }
             gest.time += dtMs;
             if (gest.time >= holdNeeded(g.type)) {
-                fire(g.type);
+                fire(g.type, g);
                 gest.latched = g.type; gest.hold = null; gest.time = 0;
             }
         }
 
-        function fire(type) {
+        function fire(type, g) {
             if (type === 'next' || type === 'prev') { cycleStyle(type === 'next' ? 1 : -1); return; }
-            if (type === 'binus') { startParty(performance.now()); return; }
+            if (type === 'binus') { if (g && g.faceId) party.faceId = g.faceId; startParty(performance.now()); return; }
             if (type === 'capture') { if (canCapture()) startCountdown(); return; }
             active[type] = !active[type];
             if (!active[type] && type === 'hearts') hearts.length = 0;
@@ -1017,12 +1097,12 @@
 
         // ================== HEART PARTICLES ==================
         const hearts = [];
-        let heartAcc = 0;
-
+        // Akumulator per wajah supaya tiap orang mengeluarkan hati dengan laju yang sama
         function spawnHearts(fg, dt) {
-            heartAcc += dt * CFG.HEART_RATE;
-            while (heartAcc >= 1) {
-                heartAcc -= 1;
+            const tr = fg.track;
+            tr.heartAcc += dt * CFG.HEART_RATE;
+            while (tr.heartAcc >= 1) {
+                tr.heartAcc -= 1;
                 spawnHeart(fg.eL, -1, fg);
                 spawnHeart(fg.eR, 1, fg);
             }
@@ -1265,8 +1345,14 @@
         const easeOutBack = x => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
 
         // Posisi tulisan: di atas kepala (di atas topi kalau topi aktif), diperhalus
-        function updatePartyAnchor(fg) {
-            if (!fg) return;
+        // Ikuti wajah yang membuat sign F; kalau wajah itu hilang, pakai wajah terbesar
+        function updatePartyAnchor(faces) {
+            if (!faces.length) return;
+            let fg = faces.find(f => f.id === party.faceId);
+            if (!fg) {
+                fg = faces.reduce((a, b) => (b.head > a.head ? b : a));
+                party.faceId = fg.id;
+            }
             const tx = fg.hatX, ty = fg.hatY - fg.head * (active.hat ? 1.1 : 0.72);
             if (!party.seen) { party.x = tx; party.y = ty; party.seen = true; }
             party.x += (tx - party.x) * 0.25; party.y += (ty - party.y) * 0.25;
@@ -1358,7 +1444,7 @@
         }
 
         let uiTick = 0;
-        function updateMode(g, fg) {
+        function updateMode(g, faces) {
             if (++uiTick % 8) return;
             let s;
             if (capState === 'countdown') s = 'REC: STAND BY...';
@@ -1367,7 +1453,7 @@
             else if (g && gest.hold === g.type) s = (g.type === 'next' || g.type === 'prev') ? `STYLE_${g.type.toUpperCase()}: LOCKING...` : `${LABEL[g.type]}: LOCKING...`;
             else if (hands.length) s = `TRACKING ${hands.length} HAND${hands.length > 1 ? 'S' : ''}`;
             else s = 'READY';
-            modeEl.textContent = `${s} | FACE: ${fg ? 'LOCKED' : 'SEARCHING'}`;
+            modeEl.textContent = `${s} | FACES: ${faces.length || 'SEARCHING'}${farCount ? ` (FAR ${farCount})` : ''} | ZOOM x${cropBudget} ${Math.round(visionMs)}ms`;
         }
 
         // ================== VIDEO CAPTURE (3 detik) + UPLOAD + QR ==================
@@ -1570,12 +1656,12 @@
         closeBtn.addEventListener('click', closeModal);
 
         // ================== CAMERA + MEDIAPIPE TASKS ==================
-        let handLandmarker = null, faceLandmarker = null;
+        let handLandmarker = null, faceLandmarker = null, farLandmarker = null, farCount = 0;
         let lastVideoTime = -1, lastVisionTs = 0, visionTick = 0;
 
         async function startCamera() {
             const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false
+                video: { width: { ideal: CFG.CAMERA_W }, height: { ideal: CFG.CAMERA_H }, facingMode: 'user' }, audio: false
             });
             video.srcObject = stream;
             await video.play();
@@ -1594,19 +1680,130 @@
                 }
             };
             handLandmarker = await create(HandLandmarker, HAND_MODEL, {
-                numHands: 2, minHandDetectionConfidence: 0.6, minHandPresenceConfidence: 0.6, minTrackingConfidence: 0.6
+                numHands: CFG.MAX_HANDS, minHandDetectionConfidence: 0.55, minHandPresenceConfidence: 0.55, minTrackingConfidence: 0.55
             });
-            faceLandmarker = await create(FaceLandmarker, FACE_MODEL, { numFaces: 1 });
+            // Confidence lebih rendah supaya wajah yang agak jauh / kecil tetap terdeteksi
+            faceLandmarker = await create(FaceLandmarker, FACE_MODEL, {
+                numFaces: CFG.MAX_FACES, minFaceDetectionConfidence: 0.35, minFacePresenceConfidence: 0.35, minTrackingConfidence: 0.35
+            });
+            // Landmarker kedua (mode IMAGE) khusus untuk potongan video yang di-zoom (wajah jauh)
+            if (CFG.FAR_DETECTION) {
+                try {
+                    farLandmarker = await create(FaceLandmarker, FACE_MODEL, {
+                        runningMode: 'IMAGE', numFaces: 4, minFaceDetectionConfidence: 0.4, minFacePresenceConfidence: 0.4
+                    });
+                } catch (e) {
+                    console.error('Far-face landmarker failed, only near faces will be detected', e);
+                }
+            }
         }
 
-        // Tangan tiap frame video baru, wajah tiap 2 frame
+        // Tangan tiap frame video baru, wajah full frame tiap 2 frame, potongan zoom tiap frame
         function runVision(now) {
             if (!handLandmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
             lastVideoTime = video.currentTime;
             const ts = Math.max(now, lastVisionTs + 1);
             lastVisionTs = ts;
             updateHands(handLandmarker.detectForVideo(video, ts));
-            if (faceLandmarker && (++visionTick % 2 === 0)) updateFace(faceLandmarker.detectForVideo(video, ts));
+            if (faceLandmarker && (++visionTick % 2 === 0)) {
+                const r = faceLandmarker.detectForVideo(video, ts);
+                updateFaces((r && r.faceLandmarks) || [], 'full');
+            }
+            if (farLandmarker) runFarCrops();
+            adaptBudget(performance.now() - now);
+        }
+
+        // Jumlah crop per frame menyesuaikan beban: kalau deteksi > budget, kurangi; kalau ringan, tambah lagi
+        let cropBudget = CFG.CROPS_PER_FRAME, visionMs = 0, budgetCooldown = 0;
+        function adaptBudget(ms) {
+            visionMs = visionMs ? visionMs * 0.9 + ms * 0.1 : ms;
+            if (--budgetCooldown > 0) return;
+            if (visionMs > CFG.VISION_BUDGET_MS && cropBudget > 1) { cropBudget--; budgetCooldown = 30; }
+            else if (visionMs < CFG.VISION_BUDGET_MS * 0.6 && cropBudget < CFG.CROPS_PER_FRAME) { cropBudget++; budgetCooldown = 30; }
+        }
+
+        // ================== FAR FACE DETECTION (zoom crop) ==================
+        // Detektor wajah MediaPipe hanya untuk jarak dekat; wajah jauh terlalu kecil di full frame.
+        // 1. SCAN: frame dibagi beberapa tile persegi yang saling tumpang tindih, lalu di-zoom
+        //    (1 tile per frame, bergiliran) untuk menemukan wajah jauh yang baru.
+        // 2. TRACK: wajah yang tidak terlihat oleh deteksi full frame dilacak lewat crop zoom di sekitar wajahnya.
+        const cropCanvas = document.createElement('canvas');
+        const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: false });
+        let scanIdx = 0, trackIdx = 0;
+
+        // Tile persegi multi-skala, overlap 25% (wajah di batas tile tetap utuh di tile tetangga).
+        // Urutan diselang-seling antar skala supaya kedua skala ter-scan merata. Di-cache per resolusi video.
+        let tileCache = { key: '', tiles: [] };
+        function scanTiles() {
+            const vw = video.videoWidth, vh = video.videoHeight, key = `${vw}x${vh}`;
+            if (tileCache.key === key) return tileCache.tiles;
+            const perScale = CFG.SCAN_TILES.map(frac => {
+                const ts = Math.round(Math.min(vh, vw * frac));
+                const steps = len => {
+                    if (len <= ts) return [0];
+                    const n = Math.ceil((len - ts) / (ts * 0.75)) + 1;
+                    return Array.from({ length: n }, (_, i) => Math.round(i * (len - ts) / (n - 1)));
+                };
+                const list = [];
+                steps(vh).forEach(sy => steps(vw).forEach(sx => list.push({ sx, sy, sw: ts, sh: ts })));
+                return list;
+            });
+            const tiles = [];
+            for (let i = 0; i < Math.max(...perScale.map(l => l.length)); i++) perScale.forEach(l => { if (l[i]) tiles.push(l[i]); });
+            tileCache = { key, tiles };
+            return tiles;
+        }
+
+        // Koordinat layar -> koordinat piksel video asli (kebalikan toScreen)
+        function screenToVideo(p) {
+            return {
+                x: (W - p.x - layout.ox) / layout.dw * video.videoWidth,
+                y: (p.y - layout.oy) / layout.dh * video.videoHeight
+            };
+        }
+
+        function trackCrop(t) {
+            const vw = video.videoWidth, vh = video.videoHeight;
+            const c = screenToVideo(mid(t.pts.eL, t.pts.eR));
+            const fw = D(t.pts.sL, t.pts.sR) / layout.dw * vw;          // lebar wajah dalam piksel video
+            const s = Math.round(Math.min(Math.min(vw, vh), Math.max(160, fw * CFG.FAR_TRACK_ZOOM)));
+            const sx = Math.min(vw - s, Math.max(0, Math.round(c.x - s / 2)));
+            const sy = Math.min(vh - s, Math.max(0, Math.round(c.y - s * 0.42)));   // sedikit ke atas: sisakan ruang dahi/rambut
+            return { sx, sy, sw: s, sh: s };
+        }
+
+        function detectCrop(crop) {
+            const vw = video.videoWidth, vh = video.videoHeight, C = CFG.CROP_SIZE;
+            cropCanvas.width = C; cropCanvas.height = C;
+            cropCtx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, C, C);
+            let res;
+            try { res = farLandmarker.detect(cropCanvas); } catch (e) { console.warn(e); return; }
+            const list = [];
+            ((res && res.faceLandmarks) || []).forEach(lm => {
+                // Tolak wajah yang terpotong tepi crop (landmark-nya tidak akurat), kecuali tepi itu memang tepi video
+                let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+                lm.forEach(p => { if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x; if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; });
+                const m = 0.02;
+                if ((x0 < m && crop.sx > 0) || (y0 < m && crop.sy > 0) ||
+                    (x1 > 1 - m && crop.sx + crop.sw < vw) || (y1 > 1 - m && crop.sy + crop.sh < vh)) return;
+                // Koordinat crop -> koordinat ternormalisasi full video
+                list.push(lm.map(p => ({ x: (crop.sx + p.x * crop.sw) / vw, y: (crop.sy + p.y * crop.sh) / vh })));
+            });
+            updateFaces(list, 'crop');
+        }
+
+        function runFarCrops() {
+            const now = performance.now();
+            // Wajah yang tidak terlihat oleh deteksi full frame selama > 300 ms = wajah jauh
+            const far = faceTracks.filter(t => now - t.time <= CFG.FACE_TIMEOUT && now - (t.fullTime || 0) > 300);
+            farCount = far.length;
+            const n = cropBudget;
+            const tiles = scanTiles();
+            for (let i = 0; i < n; i++) {
+                // Selalu sisakan slot scan supaya wajah jauh yang baru tetap ditemukan
+                const scanSlot = !far.length || (n === 1 ? visionTick % 2 === 1 : i === n - 1);
+                detectCrop(scanSlot ? tiles[scanIdx++ % tiles.length] : trackCrop(far[trackIdx++ % far.length]));
+            }
         }
 
         // ================== MAIN LOOP ==================
@@ -1620,10 +1817,10 @@
 
             computeLayout();
             runVision(now);
-            const fg = faceGeom();
-            const g = detectGesture(fg);
+            const faces = faceGeoms();
+            const g = detectGesture(faces);
             processGesture(g, dtMs);
-            updatePartyAnchor(fg);
+            updatePartyAnchor(faces);
             // Selama sign F masih ditahan, tulisan tetap tampil
             if (g && g.type === 'binus' && gest.latched === 'binus') party.until = Math.max(party.until, now + 1500);
             const partyOn = now < party.until + CFG.PARTY_FADE;
@@ -1634,9 +1831,12 @@
             ctx.drawImage(video, layout.ox, layout.oy, layout.dw, layout.dh);
             ctx.restore();
 
-            if (fg && active.hat) drawHat(fg, t);
-            if (fg && active.hearts) { spawnHearts(fg, dt); drawEyeHearts(fg, t); }
-            if (fg && active.glasses) drawGlasses(fg, t);
+            // Aksesoris dipasang ke SEMUA wajah yang terdeteksi
+            faces.forEach(fg => {
+                if (active.hat) drawHat(fg, t);
+                if (active.hearts) { spawnHearts(fg, dt); drawEyeHearts(fg, t); }
+                if (active.glasses) drawGlasses(fg, t);
+            });
             updateDrawHearts(dt);
             if (partyOn) drawPartyText(now);
             updateDrawConfetti(dt, now < party.until);
@@ -1646,7 +1846,7 @@
 
             if (showSkeleton) drawSkeletons();
             if (g && gest.hold === g.type) drawHUDCircle(g.x, g.y, Math.min(1, gest.time / holdNeeded(g.type)), GESTURE_COLOR[g.type]);
-            updateMode(g, fg);
+            updateMode(g, faces);
         }
 
         // ================== EVENTS / BOOT ==================
