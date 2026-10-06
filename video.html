@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Accessory Filter - Your Video</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; min-height: 100vh; background: #10000e; color: #ff6ad5;
+            font-family: 'Courier New', monospace; display: flex; flex-direction: column; align-items: center;
+            padding: max(20px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+            background-image: radial-gradient(ellipse at top, rgba(255, 106, 213, 0.16), transparent 60%);
+        }
+        h1 { font-size: 15px; letter-spacing: 2px; margin: 4px 0 16px; text-align: center; text-shadow: 0 0 10px #ff6ad5; }
+        .frame {
+            width: 100%; max-width: 720px; border: 1px solid #ff6ad5; border-left-width: 3px;
+            box-shadow: 0 0 30px rgba(255, 106, 213, 0.25); background: #000; min-height: 120px;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .frame video { width: 100%; height: auto; display: block; }
+        .actions { display: flex; gap: 10px; width: 100%; max-width: 720px; margin-top: 16px; }
+        .btn {
+            flex: 1; font-family: inherit; font-weight: bold; font-size: 15px; letter-spacing: 1px;
+            color: #20001c; background: #ff6ad5; border: 1px solid #ff6ad5; padding: 14px 10px;
+            cursor: pointer; border-radius: 0; -webkit-appearance: none; appearance: none;
+        }
+        .btn.secondary { color: #ff6ad5; background: rgba(255, 106, 213, 0.08); }
+        .btn:disabled { opacity: 0.45; cursor: default; }
+        .btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+        #status { margin-top: 14px; font-size: 13px; min-height: 18px; text-align: center; color: #ffb3ec; }
+        .hint { margin-top: 8px; font-size: 11px; color: rgba(255, 179, 236, 0.65); text-align: center; max-width: 720px; line-height: 1.6; }
+    </style>
+</head>
+<body>
+    <h1>FILTER_SYNC // YOUR 3s VIDEO</h1>
+
+    <div class="frame"><video id="clip" controls autoplay loop muted playsinline aria-label="Video Accessory Filter kamu"></video></div>
+
+    <div class="actions">
+        <button id="save_btn" class="btn" type="button" disabled>SAVE VIDEO</button>
+        <button id="share_btn" class="btn secondary" type="button" disabled>SHARE</button>
+    </div>
+    <div id="status" role="status" aria-live="polite">Memuat video...</div>
+    <div class="hint" id="hint">iPhone: tekan SAVE VIDEO lalu pilih "Save Video" supaya masuk ke Photos.</div>
+
+    <script src="config.js"></script>
+    <script>
+        const APP = Object.assign({ SUPABASE_URL: '', BUCKET: 'fog-glass', FOLDER: 'videos' }, window.FILTER_SYNC_CONFIG || {});
+        const clipEl = document.getElementById('clip');
+        const saveBtn = document.getElementById('save_btn');
+        const shareBtn = document.getElementById('share_btn');
+        const statusEl = document.getElementById('status');
+
+        const isTouch = window.matchMedia('(pointer: coarse)').matches;
+        let file = null, objectUrl = null, fileName = 'filter-sync.mp4';
+
+        // Hanya terima path video milik app ini (bukan URL bebas)
+        const path = new URLSearchParams(location.search).get('v') || '';
+        const folderRe = APP.FOLDER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const validPath = new RegExp(`^${folderRe}/\\d{4}-\\d{2}-\\d{2}/[A-Za-z0-9-]+\\.(mp4|webm)$`).test(path);
+
+        function setStatus(t) { statusEl.textContent = t; }
+
+        async function load() {
+            if (!APP.SUPABASE_URL || !validPath) { setStatus('Link video tidak valid.'); return; }
+
+            // Video diambil dari Supabase Storage (bucket publik)
+            const publicUrl = `${APP.SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/public/${encodeURIComponent(APP.BUCKET)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+            const ext = path.split('.').pop();
+            const type = ext === 'mp4' ? 'video/mp4' : 'video/webm';
+            fileName = `filter-sync-${path.split('/')[1]}-${path.split('/').pop().slice(0, 8)}.${ext}`;
+
+            try {
+                // Blob diambil di awal: navigator.share() di iOS harus dipanggil langsung dari tap, tanpa await fetch
+                const res = await fetch(publicUrl);
+                if (!res.ok) throw new Error(res.status === 404 || res.status === 400 ? 'Video tidak ditemukan atau sudah dihapus.' : `HTTP ${res.status}`);
+                const blob = await res.blob();
+                file = new File([blob], fileName, { type });
+                objectUrl = URL.createObjectURL(file);
+                clipEl.src = objectUrl;
+                clipEl.play().catch(() => {});
+                saveBtn.disabled = false;
+                shareBtn.disabled = false;
+                setStatus('');
+            } catch (err) {
+                console.error(err);
+                clipEl.src = publicUrl;   // fallback: putar langsung dari URL publik
+                clipEl.onerror = () => setStatus('Video tidak ditemukan atau format tidak didukung browser ini.');
+                setStatus(err.message || 'Gagal memuat video.');
+            }
+            clipEl.onerror = clipEl.onerror || (() => {
+                setStatus(ext === 'webm' ? 'Browser ini tidak bisa memutar WebM. Coba SAVE VIDEO atau buka di Chrome.' : 'Video tidak bisa diputar di browser ini.');
+            });
+        }
+
+        const canShareFile = () => !!(file && navigator.canShare && navigator.canShare({ files: [file] }));
+
+        function downloadFile() {
+            const a = document.createElement('a');
+            a.href = objectUrl; a.download = fileName;
+            document.body.appendChild(a); a.click(); a.remove();
+            setStatus('Video tersimpan ke folder Downloads.');
+        }
+
+        async function shareFile(opts) {
+            try { await navigator.share(opts); return true; }
+            catch (err) {
+                if (err.name === 'AbortError') return true;   // user batal
+                console.error(err);
+                return false;
+            }
+        }
+
+        // SAVE: di HP lewat share sheet (cara web menyimpan ke Photos/Galeri di iOS), di desktop download biasa
+        saveBtn.addEventListener('click', async () => {
+            if (isTouch && canShareFile() && await shareFile({ files: [file] })) return;
+            downloadFile();
+        });
+
+        // SHARE: file video -> link -> salin link
+        shareBtn.addEventListener('click', async () => {
+            if (canShareFile() && await shareFile({ files: [file], title: 'Accessory Filter' })) return;
+            if (navigator.share && await shareFile({ title: 'Accessory Filter', url: location.href })) return;
+            try {
+                await navigator.clipboard.writeText(location.href);
+                setStatus('Link disalin ke clipboard.');
+            } catch {
+                setStatus('Tidak bisa share di browser ini. Salin link dari address bar.');
+            }
+        });
+
+        if (!isTouch) document.getElementById('hint').textContent = 'Klik SAVE VIDEO untuk download, atau SHARE untuk membagikan.';
+        load();
+    </script>
+</body>
+</html>

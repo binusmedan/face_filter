@@ -1,0 +1,1682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accessory Filter v1.0 - Gesture Sync</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&display=swap">
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+        #input_video { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+        #stage { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        #ui {
+            position: absolute; top: 20px; left: 20px; z-index: 100;
+            color: #ff6ad5; font-weight: bold; font-size: 14px;
+            text-shadow: 0 0 10px #ff6ad5; border-left: 3px solid #ff6ad5;
+            background: rgba(0, 0, 0, 0.6); padding: 15px;
+        }
+        .stat-val { color: #fff; }
+        .on { color: #7dffb2; text-shadow: 0 0 10px #7dffb2; }
+        .off { color: #8a8a8a; text-shadow: none; }
+        .hint { font-size: 10px; margin-top: 6px; color: #ffb3ec; line-height: 1.6; }
+        #toast {
+            position: absolute; top: 7vh; left: 50%; transform: translateX(-50%); z-index: 120;
+            color: #fff; font-weight: bold; font-size: 22px; letter-spacing: 2px; white-space: nowrap;
+            text-shadow: 0 0 14px #ff6ad5; background: rgba(0, 0, 0, 0.5); border: 1px solid #ff6ad5;
+            padding: 10px 18px; opacity: 0; transition: opacity 0.25s; pointer-events: none;
+        }
+        #toast.show { opacity: 1; }
+
+        .btn {
+            font-family: inherit; font-weight: bold; font-size: 12px; letter-spacing: 1px;
+            color: #ff6ad5; background: rgba(255, 106, 213, 0.08); border: 1px solid #ff6ad5;
+            padding: 8px 14px; cursor: pointer; text-shadow: inherit; text-decoration: none;
+        }
+        .btn:hover, .btn:focus-visible { background: rgba(255, 106, 213, 0.25); outline: none; }
+        #rec_btn { margin-top: 10px; }
+
+        /* Hitung mundur */
+        #countdown {
+            position: absolute; inset: 0; z-index: 140; display: none;
+            align-items: center; justify-content: center; pointer-events: none;
+            color: #fff; font-size: 180px; font-weight: bold; text-shadow: 0 0 30px #ff6ad5;
+        }
+
+        /* Indikator rekam (tidak ikut terekam, karena DOM bukan canvas) */
+        #rec_indicator {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%); z-index: 130; display: none;
+            color: #fff; font-weight: bold; font-size: 16px; letter-spacing: 2px;
+            background: rgba(0, 0, 0, 0.55); border: 1px solid #ff3b3b; padding: 8px 14px 10px; min-width: 180px; text-align: center;
+        }
+        #rec_indicator .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #ff3b3b; margin-right: 8px; animation: blink 0.8s infinite; }
+        #rec_bar { height: 3px; background: #ff3b3b; width: 0; margin-top: 6px; }
+        @keyframes blink { 50% { opacity: 0.2; } }
+
+        /* Modal hasil video + QR */
+        #video_modal {
+            position: absolute; inset: 0; z-index: 200; display: none;
+            align-items: center; justify-content: center;
+            background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        }
+        #video_modal.open { display: flex; }
+        .modal-card {
+            display: flex; gap: 24px; align-items: center; flex-wrap: wrap; justify-content: center;
+            max-width: 92vw; padding: 24px; color: #ff6ad5; text-shadow: 0 0 10px #ff6ad5;
+            background: rgba(16, 0, 14, 0.9); border: 1px solid #ff6ad5; box-shadow: 0 0 40px rgba(255, 106, 213, 0.3);
+        }
+        #video_preview { max-width: min(56vw, 720px); max-height: 70vh; border: 1px solid rgba(255, 106, 213, 0.5); background: #000; }
+        .qr-side { display: flex; flex-direction: column; align-items: center; gap: 12px; width: 260px; text-align: center; font-weight: bold; }
+        #qr_box {
+            width: 240px; height: 240px; background: #fff; display: flex; text-shadow: none;
+            align-items: center; justify-content: center; color: #20001c; font-size: 12px; padding: 8px; box-sizing: border-box;
+        }
+        #qr_box img { width: 100%; height: 100%; image-rendering: pixelated; }
+        #upload_status { font-size: 13px; min-height: 32px; }
+        #modal_timer { font-size: 10px; color: #ffb3ec; }
+        .modal-actions { display: flex; gap: 8px; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div>FILTER_SYNC: ACCESSORY_OS_v1.0</div>
+        <div>STATE: <span id="mode" class="stat-val">INITIALIZING</span></div>
+        <div>GLASSES: <span id="st_glasses" class="off">OFF</span></div>
+        <div>HEART EYES: <span id="st_hearts" class="off">OFF</span></div>
+        <div>HAT: <span id="st_hat" class="off">OFF</span></div>
+        <div class="hint">
+            2x OK SIGN ON EYES: GLASSES<br>
+            HEART HANDS: HEART EYES<br>
+            TRIANGLE HANDS: HAT<br>
+            F SIGN (1 HAND): BINUS CELEBRATION<br>
+            PEACE SIGN (&#9996;): HOLD TO RECORD 3s VIDEO<br>
+            R-FIST + L-OPEN: NEXT STYLE | L-FIST + R-OPEN: PREV STYLE<br>
+            KEYS: [1][2][3] TOGGLE &nbsp;[B] BINUS &nbsp;[V] REC &nbsp;[&larr;][&rarr;] STYLE &nbsp;[H] SKELETON &nbsp;[X] CLEAR
+        </div>
+        <button id="rec_btn" class="btn" type="button">[ REC 3s VIDEO ]</button>
+    </div>
+
+    <video id="input_video" autoplay playsinline muted></video>
+    <canvas id="stage"></canvas>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <div id="countdown" aria-live="assertive"></div>
+    <div id="rec_indicator" aria-live="polite"><span class="dot"></span><span id="rec_text">REC 3.0s</span><div id="rec_bar"></div></div>
+
+    <div id="video_modal" role="dialog" aria-modal="true" aria-labelledby="modal_title">
+        <div class="modal-card">
+            <video id="video_preview" autoplay loop muted playsinline aria-label="Recorded 3 second filter video"></video>
+            <div class="qr-side">
+                <div id="modal_title">FILTER_CAPTURE: COMPLETE</div>
+                <div id="qr_box">GENERATING...</div>
+                <div id="upload_status" aria-live="polite">UPLOADING...</div>
+                <div class="modal-actions">
+                    <a id="save_local" class="btn" download>SAVE LOCAL</a>
+                    <button id="close_modal" class="btn" type="button">CLOSE [ESC]</button>
+                </div>
+                <div id="modal_timer"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+
+    <script>
+        // ================== CONFIG ==================
+        const CFG = {
+            HOLD: 600,              // ms tahan gesture aksesoris untuk toggle ON/OFF
+            STYLE_HOLD: 500,        // ms tahan kepal + buka untuk ganti style
+            RELEASE_GRACE: 250,     // ms gesture boleh hilang sebentar (flicker) sebelum dianggap dilepas
+            OK_PINCH: 0.38,         // jarak jempol-telunjuk / ukuran tangan untuk tanda OK (kacamata)
+            TOUCH: 0.5,             // jarak sentuh antar tangan / ukuran tangan (hati & segitiga)
+            STRAIGHT: 0.86,         // kelurusan telunjuk: >= segitiga (lurus), < hati (melengkung)
+            GLASSES_EYE_DIST: 1.1,  // jarak lingkaran OK ke mata maks (x jarak antar mata)
+            HEART_RATE: 8,          // hati per detik per mata
+            MAX_HEARTS: 260,
+            HAT_OFFSET: 0.0,        // geser topi vertikal (x lebar kepala), negatif = naik, positif = lebih menutup dahi
+            HAT_SCALE: 1.08,        // ukuran topi relatif ke kepala (naikkan kalau rambut samping masih terlihat)
+            HAT_YAW_SHIFT: 0.5,     // koreksi posisi topi saat kepala menoleh
+            FACE_LERP: 0.55,
+            HAND_LERP: 0.6,
+            FACE_TIMEOUT: 700,      // ms aksesoris tetap tampil saat wajah hilang sebentar
+            // Sign F -> confetti + tulisan BINUS
+            F_EYE_CLEAR: 1.3,       // lingkaran jempol-telunjuk harus sejauh ini dari mata (x jarak mata), supaya beda dari gesture kacamata
+            PARTY_DURATION: 5000,   // ms tulisan tampil setelah sign F (diperpanjang selama sign F ditahan)
+            PARTY_FADE: 700,        // ms fade out
+            LOGO_HEAD_WIDTH: 3.4,   // lebar tulisan = lebar kepala x nilai ini (min 60%, maks 92% lebar layar)
+            CONFETTI_RAIN: 45,      // confetti per detik yang jatuh dari atas selama aktif
+            MAX_CONFETTI: 600,
+            // Rekam video
+            CAPTURE_HOLD: 1200,     // ms tahan peace sign untuk mulai countdown
+            COUNTDOWN: 3,           // detik hitung mundur sebelum rekam
+            REC_SECONDS: 3,         // durasi video
+            REC_LONG_SIDE: 1280,    // resolusi video (sisi terpanjang, px)
+            REC_FPS: 30,
+            REC_BITRATE: 5000000,   // 5 Mbps -> sekitar 2 MB untuk 3 detik
+            MODAL_TIMEOUT: 60       // detik, modal QR otomatis tertutup
+        };
+
+        const VISION_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1';
+        const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+        const FACE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+        const CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[9,10],[10,11],[11,12],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+
+        // ================== DOM ==================
+        const video = document.getElementById('input_video');
+        const canvas = document.getElementById('stage');
+        const ctx = canvas.getContext('2d');
+        const modeEl = document.getElementById('mode');
+        const toastEl = document.getElementById('toast');
+        const statEls = { glasses: document.getElementById('st_glasses'), hearts: document.getElementById('st_hearts'), hat: document.getElementById('st_hat') };
+
+        let W = 0, H = 0, dpr = 1;
+        const layout = { ox: 0, oy: 0, dw: 0, dh: 0 };
+
+        const D = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+        const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+        function resize() {
+            dpr = Math.min(2, window.devicePixelRatio || 1);
+            W = window.innerWidth; H = window.innerHeight;
+            canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+            computeLayout();
+        }
+
+        function computeLayout() {
+            const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+            const s = Math.max(W / vw, H / vh);          // object-fit: cover
+            layout.dw = vw * s; layout.dh = vh * s;
+            layout.ox = (W - layout.dw) / 2; layout.oy = (H - layout.dh) / 2;
+        }
+
+        // Landmark ternormalisasi -> koordinat layar (cover + mirror)
+        function toScreen(lm) {
+            return { x: W - (lm.x * layout.dw + layout.ox), y: lm.y * layout.dh + layout.oy };
+        }
+
+        // ================== SHAPE HELPERS ==================
+        // Jalur hati, pusat (x, y), lebar s. Bisa dipakai di ctx maupun Path2D.
+        function heartPath(c, x, y, s) {
+            const P = (px, py) => [x + px * s, y + py * s];
+            if (typeof c.beginPath === 'function') c.beginPath();
+            c.moveTo(...P(0, 0.35));
+            c.bezierCurveTo(...P(-0.1, 0.25), ...P(-0.5, 0.05), ...P(-0.5, -0.2));
+            c.bezierCurveTo(...P(-0.5, -0.45), ...P(-0.2, -0.55), ...P(0, -0.3));
+            c.bezierCurveTo(...P(0.2, -0.55), ...P(0.5, -0.45), ...P(0.5, -0.2));
+            c.bezierCurveTo(...P(0.5, 0.05), ...P(0.1, 0.25), ...P(0, 0.35));
+            c.closePath();
+        }
+
+        function starPath(c, x, y, r, n = 5) {
+            c.beginPath();
+            for (let i = 0; i < n * 2; i++) {
+                const a = -Math.PI / 2 + i * Math.PI / n, rr = i % 2 ? r * 0.45 : r;
+                c.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+            }
+            c.closePath();
+        }
+
+        function circle(c, x, y, r, fill) { c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fillStyle = fill; c.fill(); }
+
+        // ================== GLASSES (unit = jarak antar mata, mata di x = -0.5 / +0.5) ==================
+        function temples(c, color, lw, x0) {
+            c.strokeStyle = color; c.lineWidth = lw; c.lineCap = 'round';
+            c.beginPath();
+            c.moveTo(-x0, -0.06); c.lineTo(-x0 - 0.22, -0.1);
+            c.moveTo(x0, -0.06); c.lineTo(x0 + 0.22, -0.1);
+            c.stroke();
+        }
+
+        function drawRoundGlasses(c) {
+            temples(c, '#141414', 0.06, 0.8);
+            [-1, 1].forEach(s => {
+                c.beginPath(); c.arc(0.5 * s, 0, 0.31, 0, Math.PI * 2);
+                c.fillStyle = 'rgba(25,25,35,0.22)'; c.fill();
+                c.lineWidth = 0.075; c.strokeStyle = '#141414'; c.stroke();
+                c.beginPath(); c.arc(0.5 * s, 0, 0.23, -2.5, -1.7);
+                c.lineWidth = 0.03; c.strokeStyle = 'rgba(255,255,255,0.45)'; c.stroke();
+            });
+            c.beginPath(); c.moveTo(-0.2, -0.05); c.quadraticCurveTo(0, -0.16, 0.2, -0.05);
+            c.lineWidth = 0.06; c.strokeStyle = '#141414'; c.stroke();
+        }
+
+        function aviatorLensPath(p, s) {
+            const X = x => 0.5 * s + x * s;
+            p.moveTo(X(-0.32), -0.17);
+            p.bezierCurveTo(X(-0.1), -0.24, X(0.25), -0.25, X(0.36), -0.15);
+            p.bezierCurveTo(X(0.42), 0.05, X(0.3), 0.32, X(0.05), 0.32);
+            p.bezierCurveTo(X(-0.2), 0.32, X(-0.34), 0.1, X(-0.32), -0.17);
+            p.closePath();
+        }
+
+        function drawAviator(c) {
+            temples(c, '#c9a227', 0.035, 0.86);
+            const p = new Path2D();
+            [-1, 1].forEach(s => aviatorLensPath(p, s));
+            const g = c.createLinearGradient(0, -0.25, 0, 0.33);
+            g.addColorStop(0, 'rgba(35,22,10,0.88)'); g.addColorStop(1, 'rgba(210,130,50,0.35)');
+            c.fillStyle = g; c.fill(p);
+            c.strokeStyle = '#d4af37'; c.lineWidth = 0.035; c.stroke(p);
+            c.beginPath();
+            c.moveTo(-0.18, -0.17); c.lineTo(0.18, -0.17);
+            c.moveTo(-0.17, -0.05); c.quadraticCurveTo(0, -0.11, 0.17, -0.05);
+            c.stroke();
+            c.strokeStyle = 'rgba(255,255,255,0.35)'; c.lineWidth = 0.025;
+            c.beginPath();
+            [-1, 1].forEach(s => { c.moveTo(0.5 * s - 0.15, -0.1); c.lineTo(0.5 * s - 0.02, -0.18); });
+            c.stroke();
+        }
+
+        function drawHeartGlasses(c) {
+            temples(c, '#ff2d8a', 0.05, 0.82);
+            [-1, 1].forEach(s => {
+                heartPath(c, 0.5 * s, 0.03, 0.66);
+                c.fillStyle = 'rgba(255,80,160,0.38)'; c.fill();
+                c.lineWidth = 0.05; c.strokeStyle = '#ff2d8a'; c.stroke();
+                c.beginPath(); c.ellipse(0.5 * s - 0.12, -0.1, 0.06, 0.035, -0.6, 0, Math.PI * 2);
+                c.fillStyle = 'rgba(255,255,255,0.6)'; c.fill();
+            });
+            c.beginPath(); c.moveTo(-0.17, -0.1); c.quadraticCurveTo(0, -0.18, 0.17, -0.1);
+            c.lineWidth = 0.045; c.strokeStyle = '#ff2d8a'; c.stroke();
+        }
+
+        function drawCyberVisor(c, t) {
+            const p = new Path2D();
+            p.moveTo(-1.02, -0.2); p.lineTo(1.02, -0.2); p.lineTo(0.92, 0.2); p.lineTo(0.12, 0.22);
+            p.lineTo(0, 0.12); p.lineTo(-0.12, 0.22); p.lineTo(-0.92, 0.2); p.closePath();
+            const g = c.createLinearGradient(-1, 0, 1, 0);
+            g.addColorStop(0, 'rgba(0,240,255,0.42)'); g.addColorStop(0.5, 'rgba(0,120,255,0.3)'); g.addColorStop(1, 'rgba(255,60,220,0.42)');
+            c.fillStyle = g; c.fill(p);
+            c.save();
+            c.shadowBlur = 14 * dpr; c.shadowColor = '#00f0ff';
+            c.strokeStyle = '#00f0ff'; c.lineWidth = 0.03; c.stroke(p);
+            c.restore();
+            // Scanline bergerak
+            c.save(); c.clip(p);
+            const y = -0.2 + ((t * 0.6) % 1) * 0.42;
+            c.fillStyle = 'rgba(255,255,255,0.5)'; c.fillRect(-1.1, y, 2.2, 0.02);
+            c.restore();
+            // Reticle di tiap mata
+            c.strokeStyle = 'rgba(255,255,255,0.85)'; c.lineWidth = 0.015;
+            [-1, 1].forEach(s => {
+                c.beginPath(); c.arc(0.5 * s, 0, 0.08, 0, Math.PI * 2); c.stroke();
+                c.beginPath(); c.moveTo(0.5 * s - 0.13, 0); c.lineTo(0.5 * s - 0.09, 0); c.moveTo(0.5 * s + 0.09, 0); c.lineTo(0.5 * s + 0.13, 0); c.stroke();
+            });
+        }
+
+        const PIXEL_MAP = [
+            'XXXXXXXXXXXXXXXXXXXX',
+            ' XWWXXXXX  XWWXXXXX ',
+            ' XXWWXXXX  XXWWXXXX ',
+            '  XXXXXX    XXXXXX  '
+        ];
+        function drawPixelThug(c) {
+            const cell = 0.1, x0 = -1.0, y0 = -0.17;
+            PIXEL_MAP.forEach((row, r) => {
+                for (let i = 0; i < row.length; i++) {
+                    const ch = row[i];
+                    if (ch === ' ') continue;
+                    c.fillStyle = ch === 'W' ? 'rgba(255,255,255,0.9)' : '#000';
+                    c.fillRect(x0 + i * cell, y0 + r * cell, cell + 0.003, cell + 0.003);
+                }
+            });
+        }
+
+        // ================== HATS ==================
+        // Unit = lebar kepala, origin = garis rambut tengah (sumbu kepala), y ke bawah.
+        // Semua topi dibuat >= 1.1 lebar kepala dan tinggi >= 0.75 supaya menutup rambut atas & samping.
+
+        // Lengkung quadratic dari titik sekarang (x0,y0) ke (x1,y1) yang melewati titik tengah (mx, my + sag)
+        function sagTo(p, x0, y0, x1, y1, sag) { p.quadraticCurveTo((x0 + x1) / 2, (y0 + y1) / 2 + 2 * sag, x1, y1); }
+        // y pada lengkung simetris (-half..half) dengan ujung di y0 dan lendutan sag
+        function sagY(x, half, y0, sag) { const u = (x / half + 1) / 2; return y0 + 4 * sag * u * (1 - u); }
+        function bez(a, b, c2, d, t) { const m = 1 - t; return m * m * m * a + 3 * m * m * t * b + 3 * m * t * t * c2 + t * t * t * d; }
+
+        let noisePattern = null;
+        function getNoise(c) {
+            if (noisePattern !== null) return noisePattern;
+            noisePattern = false;
+            if (typeof DOMMatrix === 'undefined') return noisePattern;
+            const n = document.createElement('canvas'); n.width = n.height = 128;
+            const g = n.getContext('2d'), img = g.createImageData(128, 128);
+            for (let i = 0; i < img.data.length; i += 4) {
+                const v = (Math.random() * 255) | 0;
+                img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+            }
+            g.putImageData(img, 0, 0);
+            const pat = c.createPattern(n, 'repeat');
+            if (pat && pat.setTransform) { pat.setTransform(new DOMMatrix().scale(0.22 / 128)); noisePattern = pat; }
+            return noisePattern;
+        }
+
+        // Tekstur kain/felt halus (soft-light noise) di dalam path
+        function texture(c, path, alpha) {
+            const pat = getNoise(c);
+            if (!pat) return;
+            c.save(); c.clip(path);
+            c.globalCompositeOperation = 'soft-light'; c.globalAlpha = alpha;
+            c.fillStyle = pat; c.fillRect(-2, -2, 4, 4);
+            c.restore();
+        }
+
+        // Shading volume: terang di titik cahaya (kiri atas), gelap di tepi
+        function shade(c, path, cx, cy, r1, dark = 0.5, light = 0.12) {
+            const g = c.createRadialGradient(cx, cy, 0, cx, cy, r1);
+            g.addColorStop(0, `rgba(255,255,255,${light})`);
+            g.addColorStop(0.5, 'rgba(0,0,0,0)');
+            g.addColorStop(1, `rgba(0,0,0,${dark})`);
+            c.save(); c.clip(path); c.fillStyle = g; c.fillRect(-2, -2, 4, 4); c.restore();
+        }
+
+        function withShadow(c, fn) {
+            c.save();
+            c.shadowColor = 'rgba(0,0,0,0.45)'; c.shadowBlur = 18 * dpr; c.shadowOffsetY = 6 * dpr;
+            fn();
+            c.restore();
+        }
+
+        // Bayangan lembut yang jatuh ke dahi
+        function contactShadow(c, y, rx, ry, a) {
+            c.save();
+            c.translate(0, y); c.scale(1, ry / rx);
+            const g = c.createRadialGradient(0, 0, 0, 0, 0, rx);
+            g.addColorStop(0, `rgba(0,0,0,${a})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+            c.fillStyle = g; c.beginPath(); c.arc(0, 0, rx, 0, Math.PI * 2); c.fill();
+            c.restore();
+        }
+
+        function goldGrad(c, y0, y1) {
+            const g = c.createLinearGradient(0, y0, 0, y1);
+            g.addColorStop(0, '#fff6c8'); g.addColorStop(0.25, '#f5c84c'); g.addColorStop(0.5, '#b8860b');
+            g.addColorStop(0.72, '#f1c75a'); g.addColorStop(1, '#7a5200');
+            return g;
+        }
+
+        function pearl(c, x, y, r) {
+            const g = c.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.1, x, y, r);
+            g.addColorStop(0, '#ffffff'); g.addColorStop(0.6, '#ece6da'); g.addColorStop(1, '#9e968a');
+            c.fillStyle = g; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+        }
+
+        function gem(c, x, y, rx, ry, color, dark) {
+            c.beginPath(); c.ellipse(x, y, rx + 0.012, ry + 0.012, 0, 0, Math.PI * 2);
+            c.fillStyle = goldGrad(c, y - ry, y + ry); c.fill();
+            const g = c.createRadialGradient(x - rx * 0.3, y - ry * 0.3, 0, x, y, Math.max(rx, ry));
+            g.addColorStop(0, '#ffffff'); g.addColorStop(0.25, color); g.addColorStop(1, dark);
+            c.fillStyle = g; c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); c.fill();
+            c.fillStyle = 'rgba(255,255,255,0.75)';
+            c.beginPath(); c.ellipse(x - rx * 0.35, y - ry * 0.4, rx * 0.22, ry * 0.15, -0.5, 0, Math.PI * 2); c.fill();
+        }
+
+        // ---------- 1. FEDORA (felt charcoal, pita grosgrain) ----------
+        function drawFedora(c) {
+            contactShadow(c, 0.12, 0.72, 0.14, 0.45);
+            const brimBack = new Path2D();
+            brimBack.ellipse(0, -0.02, 0.84, 0.17, 0, 0, Math.PI * 2);
+            let g = c.createLinearGradient(0, -0.2, 0, 0.15);
+            g.addColorStop(0, '#141519'); g.addColorStop(1, '#2c2e35');
+            c.fillStyle = g; withShadow(c, () => c.fill(brimBack));
+
+            const crown = new Path2D();
+            crown.moveTo(-0.56, 0);
+            crown.bezierCurveTo(-0.58, -0.28, -0.54, -0.5, -0.48, -0.6);
+            crown.quadraticCurveTo(-0.3, -0.77, -0.12, -0.7);
+            crown.quadraticCurveTo(0, -0.6, 0.12, -0.7);
+            crown.quadraticCurveTo(0.3, -0.77, 0.48, -0.6);
+            crown.bezierCurveTo(0.54, -0.5, 0.58, -0.28, 0.56, 0);
+            sagTo(crown, 0.56, 0, -0.56, 0, 0.09);
+            crown.closePath();
+            g = c.createLinearGradient(-0.56, 0, 0.56, 0);
+            g.addColorStop(0, '#1b1d22'); g.addColorStop(0.3, '#4a4e58'); g.addColorStop(0.55, '#373a42'); g.addColorStop(1, '#16171b');
+            c.fillStyle = g; withShadow(c, () => c.fill(crown));
+            // Pinch depan + crease tengah
+            c.save(); c.clip(crown);
+            [-1, 1].forEach(s => {
+                const pg = c.createRadialGradient(0.27 * s, -0.42, 0, 0.27 * s, -0.42, 0.2);
+                pg.addColorStop(0, 'rgba(0,0,0,0.35)'); pg.addColorStop(1, 'rgba(0,0,0,0)');
+                c.fillStyle = pg; c.fillRect(-1, -1, 2, 2);
+            });
+            const cg = c.createLinearGradient(0, -0.66, 0, -0.25);
+            cg.addColorStop(0, 'rgba(0,0,0,0.6)'); cg.addColorStop(1, 'rgba(0,0,0,0)');
+            c.strokeStyle = cg; c.lineWidth = 0.035;
+            c.beginPath(); c.moveTo(0, -0.64); c.quadraticCurveTo(0.015, -0.45, 0, -0.25); c.stroke();
+            c.strokeStyle = 'rgba(255,255,255,0.09)'; c.lineWidth = 0.02;
+            c.beginPath(); c.moveTo(-0.04, -0.6); c.quadraticCurveTo(-0.03, -0.45, -0.04, -0.3); c.stroke();
+            c.restore();
+            shade(c, crown, -0.18, -0.45, 0.75, 0.45, 0.1);
+            texture(c, crown, 0.35);
+
+            // Pita
+            const band = new Path2D();
+            band.moveTo(-0.56, 0); sagTo(band, -0.56, 0, 0.56, 0, 0.09);
+            band.lineTo(0.565, -0.14); sagTo(band, 0.565, -0.14, -0.565, -0.14, 0.09);
+            band.closePath();
+            g = c.createLinearGradient(0, -0.14, 0, 0.09);
+            g.addColorStop(0, '#26272c'); g.addColorStop(0.4, '#0c0c0e'); g.addColorStop(1, '#050506');
+            c.fillStyle = g; c.fill(band);
+            c.save(); c.clip(band);
+            c.strokeStyle = 'rgba(255,255,255,0.05)'; c.lineWidth = 0.006;
+            c.beginPath();
+            for (let x = -0.56; x <= 0.56; x += 0.016) { c.moveTo(x, -0.2); c.lineTo(x, 0.12); }
+            c.stroke();
+            c.restore();
+            // Pita simpul di sisi kiri
+            const bx = -0.42, by = sagY(bx, 0.56, -0.07, 0.09);
+            c.fillStyle = '#111215';
+            c.beginPath(); c.ellipse(bx - 0.05, by, 0.06, 0.04, -0.3, 0, Math.PI * 2); c.fill();
+            c.beginPath(); c.ellipse(bx + 0.05, by, 0.06, 0.04, 0.3, 0, Math.PI * 2); c.fill();
+            c.fillStyle = '#26272c'; c.fillRect(bx - 0.018, by - 0.05, 0.036, 0.1);
+
+            // Brim depan
+            const brimFront = new Path2D();
+            brimFront.moveTo(-0.84, -0.02);
+            brimFront.ellipse(0, -0.02, 0.84, 0.17, 0, Math.PI, 0, true);
+            brimFront.lineTo(0.56, 0);
+            sagTo(brimFront, 0.56, 0, -0.56, 0, 0.09);
+            brimFront.closePath();
+            g = c.createLinearGradient(0, -0.02, 0, 0.15);
+            g.addColorStop(0, '#202227'); g.addColorStop(1, '#43464f');
+            c.fillStyle = g; c.fill(brimFront);
+            texture(c, brimFront, 0.35);
+            c.strokeStyle = '#0d0e10'; c.lineWidth = 0.02;
+            c.beginPath(); c.ellipse(0, -0.02, 0.84, 0.17, 0, Math.PI, 0, true); c.stroke();
+            c.strokeStyle = 'rgba(255,255,255,0.12)'; c.lineWidth = 0.008;
+            c.beginPath(); c.ellipse(0, -0.03, 0.82, 0.155, 0, Math.PI * 0.95, Math.PI * 0.05, true); c.stroke();
+        }
+
+        // ---------- 2. ROYAL CROWN (mahkota emas + kain beludru menutup kepala) ----------
+        function drawRoyalCrown(c, t) {
+            contactShadow(c, 0.14, 0.68, 0.12, 0.4);
+            const cap = new Path2D();
+            cap.moveTo(-0.56, -0.02);
+            cap.bezierCurveTo(-0.63, -0.5, -0.3, -0.8, 0, -0.8);
+            cap.bezierCurveTo(0.3, -0.8, 0.63, -0.5, 0.56, -0.02);
+            cap.closePath();
+            let g = c.createRadialGradient(-0.15, -0.5, 0.02, 0, -0.35, 0.72);
+            g.addColorStop(0, '#e0304e'); g.addColorStop(0.45, '#9e0f2a'); g.addColorStop(1, '#3d0010');
+            c.fillStyle = g; withShadow(c, () => c.fill(cap));
+            c.save(); c.clip(cap);
+            c.lineWidth = 0.05; c.strokeStyle = 'rgba(0,0,0,0.22)';
+            [-1, 1].forEach(s => { c.beginPath(); c.moveTo(0.45 * s, -0.05); c.quadraticCurveTo(0.36 * s, -0.5, 0.06 * s, -0.78); c.stroke(); });
+            c.restore();
+            texture(c, cap, 0.3);
+
+            // Lengkung emas (arches) + mutiara
+            const arches = [[-0.48, -0.14, -0.5, -0.56, -0.22, -0.8], [0.48, -0.14, 0.5, -0.56, 0.22, -0.8]];
+            arches.forEach(([x0, y0, x1, y1, x2, y2]) => {
+                const p = new Path2D(); p.moveTo(x0, y0); p.bezierCurveTo(x1, y1, x2, y2, 0, -0.8);
+                c.strokeStyle = '#5c3a00'; c.lineWidth = 0.07; c.stroke(p);
+                c.strokeStyle = goldGrad(c, -0.8, -0.1); c.lineWidth = 0.05; c.stroke(p);
+                for (let i = 1; i < 9; i++) {
+                    const tt = i / 9;
+                    pearl(c, bez(x0, x1, x2, 0, tt), bez(y0, y1, y2, -0.8, tt), 0.019);
+                }
+            });
+            const front = new Path2D(); front.moveTo(0, -0.16); front.quadraticCurveTo(0.02, -0.5, 0, -0.8);
+            c.strokeStyle = '#5c3a00'; c.lineWidth = 0.07; c.stroke(front);
+            c.strokeStyle = goldGrad(c, -0.8, -0.1); c.lineWidth = 0.05; c.stroke(front);
+            for (let i = 1; i < 8; i++) pearl(c, 0.01, -0.16 - i * 0.08, 0.019);
+
+            // Monde (bola) + salib
+            const og = c.createRadialGradient(-0.025, -0.89, 0.005, 0, -0.86, 0.07);
+            og.addColorStop(0, '#fff6c8'); og.addColorStop(0.5, '#e0a800'); og.addColorStop(1, '#6b4500');
+            c.fillStyle = og; c.beginPath(); c.arc(0, -0.86, 0.065, 0, Math.PI * 2); c.fill();
+            c.fillStyle = goldGrad(c, -1.05, -0.92);
+            c.fillRect(-0.018, -1.05, 0.036, 0.14); c.fillRect(-0.055, -1.0, 0.11, 0.035);
+            gem(c, 0, -0.983, 0.012, 0.012, '#4fc3f7', '#01579b');
+
+            // Crest di atas lingkar mahkota
+            [-0.44, -0.22, 0, 0.22, 0.44].forEach((x, i) => {
+                const yb = sagY(x, 0.58, -0.16, 0.1);
+                const p = new Path2D();
+                if (i % 2 === 0) {          // cross pattee
+                    p.moveTo(x - 0.06, yb); p.lineTo(x - 0.025, yb - 0.08); p.lineTo(x - 0.06, yb - 0.15);
+                    p.lineTo(x + 0.06, yb - 0.15); p.lineTo(x + 0.025, yb - 0.08); p.lineTo(x + 0.06, yb); p.closePath();
+                } else {                    // fleur
+                    p.moveTo(x - 0.06, yb); p.quadraticCurveTo(x - 0.07, yb - 0.08, x, yb - 0.13);
+                    p.quadraticCurveTo(x + 0.07, yb - 0.08, x + 0.06, yb); p.closePath();
+                }
+                c.fillStyle = goldGrad(c, yb - 0.15, yb); c.fill(p);
+                c.strokeStyle = '#5c3a00'; c.lineWidth = 0.008; c.stroke(p);
+                pearl(c, x, yb - (i % 2 === 0 ? 0.17 : 0.15), 0.022);
+            });
+
+            // Lingkar mahkota
+            const circ = new Path2D();
+            circ.moveTo(-0.58, 0); sagTo(circ, -0.58, 0, 0.58, 0, 0.1);
+            circ.lineTo(0.58, -0.16); sagTo(circ, 0.58, -0.16, -0.58, -0.16, 0.1);
+            circ.closePath();
+            c.fillStyle = goldGrad(c, -0.16, 0.1); withShadow(c, () => c.fill(circ));
+            c.strokeStyle = '#5c3a00'; c.lineWidth = 0.01; c.stroke(circ);
+            c.strokeStyle = 'rgba(255,248,200,0.7)'; c.lineWidth = 0.008;
+            c.beginPath(); c.moveTo(-0.57, -0.14); sagTo(c, -0.57, -0.14, 0.57, -0.14, 0.1); c.stroke();
+            for (let i = 0; i < 15; i++) {
+                const x = -0.52 + i * (1.04 / 14);
+                pearl(c, x, sagY(x, 0.58, -0.012, 0.1), 0.012);
+            }
+            [[0, 0.065, 0.048, '#42a5f5', '#0d2a6b'], [-0.24, 0.04, 0.04, '#ef5350', '#5c0011'], [0.24, 0.04, 0.04, '#ef5350', '#5c0011'],
+             [-0.44, 0.03, 0.03, '#66bb6a', '#0b3d12'], [0.44, 0.03, 0.03, '#66bb6a', '#0b3d12']].forEach(([x, rx, ry, col, dk]) =>
+                gem(c, x, sagY(x, 0.58, -0.08, 0.1), rx, ry, col, dk));
+            // Kilau
+            const a = 0.5 + 0.5 * Math.sin(t * 3.5);
+            c.fillStyle = `rgba(255,255,255,${0.9 * a})`;
+            starPath(c, -0.02, sagY(0, 0.58, -0.1, 0.1), 0.035, 4); c.fill();
+        }
+
+        // ---------- 3. BEANIE (rajut navy, lipatan cuff, patch kulit, pompom) ----------
+        const POM = Array.from({ length: 80 }, (_, i) => {
+            const a = i * 2.399963, r = Math.sqrt((i + 0.5) / 80) * 0.13;
+            return { x: Math.cos(a) * r, y: Math.sin(a) * r * 0.92, s: 0.028 + ((i * 37) % 10) * 0.002, k: (i * 53) % 3 };
+        });
+
+        function drawBeanie(c) {
+            contactShadow(c, 0.16, 0.68, 0.12, 0.45);
+            const body = new Path2D();
+            body.moveTo(-0.6, 0.04);
+            body.bezierCurveTo(-0.66, -0.52, -0.34, -0.84, 0, -0.84);
+            body.bezierCurveTo(0.34, -0.84, 0.66, -0.52, 0.6, 0.04);
+            body.closePath();
+            c.fillStyle = '#1f3a5f'; withShadow(c, () => c.fill(body));
+
+            // Rib rajut + jahitan V
+            c.save(); c.clip(body);
+            const f = y => 1 - 0.85 * Math.pow(Math.max(0, -y) / 0.84, 2);
+            for (let i = -10; i <= 10; i++) {
+                const x0 = i * 0.062;
+                c.beginPath();
+                for (let y = 0.05; y >= -0.86; y -= 0.05) c.lineTo((x0 + 0.031) * f(y), y);
+                c.lineWidth = 0.012; c.strokeStyle = 'rgba(0,0,0,0.4)'; c.stroke();
+                c.beginPath();
+                for (let y = 0.02; y >= -0.8; y -= 0.045) {
+                    const x = x0 * f(y), w = 0.02 * f(y);
+                    c.moveTo(x - w, y - 0.028); c.lineTo(x, y); c.lineTo(x + w, y - 0.028);
+                }
+                c.lineWidth = 0.011; c.strokeStyle = 'rgba(255,255,255,0.13)'; c.stroke();
+            }
+            c.restore();
+            shade(c, body, -0.18, -0.5, 0.8, 0.55, 0.1);
+            texture(c, body, 0.4);
+
+            // Cuff lipat
+            const cuff = new Path2D();
+            cuff.moveTo(-0.62, 0.04); sagTo(cuff, -0.62, 0.04, 0.62, 0.04, 0.1);
+            cuff.lineTo(0.63, -0.2); sagTo(cuff, 0.63, -0.2, -0.63, -0.2, 0.1);
+            cuff.closePath();
+            c.fillStyle = '#25456f'; withShadow(c, () => c.fill(cuff));
+            c.save(); c.clip(cuff);
+            for (let x = -0.62; x <= 0.62; x += 0.034) {
+                c.beginPath(); c.moveTo(x, sagY(x, 0.62, 0.06, 0.1)); c.lineTo(x, sagY(x, 0.63, -0.22, 0.1));
+                c.lineWidth = 0.012; c.strokeStyle = 'rgba(0,0,0,0.35)'; c.stroke();
+                c.beginPath(); c.moveTo(x + 0.017, sagY(x, 0.62, 0.06, 0.1)); c.lineTo(x + 0.017, sagY(x, 0.63, -0.22, 0.1));
+                c.lineWidth = 0.01; c.strokeStyle = 'rgba(255,255,255,0.1)'; c.stroke();
+            }
+            const cgd = c.createLinearGradient(0, -0.2, 0, 0.14);
+            cgd.addColorStop(0, 'rgba(255,255,255,0.16)'); cgd.addColorStop(0.3, 'rgba(0,0,0,0)'); cgd.addColorStop(1, 'rgba(0,0,0,0.3)');
+            c.fillStyle = cgd; c.fillRect(-1, -0.3, 2, 0.5);
+            c.restore();
+            shade(c, cuff, -0.2, -0.05, 0.75, 0.45, 0.05);
+            texture(c, cuff, 0.4);
+
+            // Patch kulit
+            const pg = c.createLinearGradient(0, 0.02, 0, 0.12);
+            pg.addColorStop(0, '#a8784a'); pg.addColorStop(1, '#6b4426');
+            c.fillStyle = pg; c.fillRect(-0.1, 0.02, 0.2, 0.1);
+            c.save(); c.strokeStyle = 'rgba(255,235,200,0.7)'; c.lineWidth = 0.005; c.setLineDash([0.012, 0.008]);
+            c.strokeRect(-0.088, 0.032, 0.176, 0.076); c.restore();
+            c.fillStyle = 'rgba(60,35,15,0.8)'; starPath(c, 0, 0.07, 0.025); c.fill();
+
+            // Pompom
+            const px = 0, py = -0.9;
+            const base = c.createRadialGradient(px - 0.04, py - 0.04, 0.01, px, py, 0.15);
+            base.addColorStop(0, '#fbf6ea'); base.addColorStop(1, '#a89f8c');
+            c.fillStyle = base; c.beginPath(); c.arc(px, py, 0.135, 0, Math.PI * 2); c.fill();
+            const tones = ['rgba(255,252,242,0.75)', 'rgba(220,210,190,0.7)', 'rgba(180,170,150,0.6)'];
+            POM.forEach(q => { c.fillStyle = tones[q.k]; c.beginPath(); c.arc(px + q.x, py + q.y, q.s, 0, Math.PI * 2); c.fill(); });
+            const ps = c.createRadialGradient(px - 0.05, py - 0.05, 0, px, py, 0.17);
+            ps.addColorStop(0, 'rgba(255,255,255,0.2)'); ps.addColorStop(0.6, 'rgba(0,0,0,0)'); ps.addColorStop(1, 'rgba(0,0,0,0.35)');
+            c.fillStyle = ps; c.beginPath(); c.arc(px, py, 0.17, 0, Math.PI * 2); c.fill();
+        }
+
+        // ---------- 4. BASEBALL CAP (twill navy, jahitan panel, visor) ----------
+        function drawCap(c) {
+            contactShadow(c, 0.3, 0.62, 0.14, 0.4);     // bayangan visor di wajah
+            contactShadow(c, 0.16, 0.66, 0.12, 0.45);
+            const crown = new Path2D();
+            crown.moveTo(-0.58, 0.02);
+            crown.bezierCurveTo(-0.63, -0.5, -0.32, -0.76, 0, -0.76);
+            crown.bezierCurveTo(0.32, -0.76, 0.63, -0.5, 0.58, 0.02);
+            sagTo(crown, 0.58, 0.02, -0.58, 0.02, 0.07);
+            crown.closePath();
+            let g = c.createLinearGradient(-0.58, 0, 0.58, 0);
+            g.addColorStop(0, '#0b1322'); g.addColorStop(0.35, '#2a4370'); g.addColorStop(0.6, '#1a2a47'); g.addColorStop(1, '#09101d');
+            c.fillStyle = g; withShadow(c, () => c.fill(crown));
+            shade(c, crown, -0.15, -0.45, 0.78, 0.45, 0.12);
+            texture(c, crown, 0.3);
+
+            // Jahitan panel
+            c.save(); c.clip(crown);
+            const seams = [[0, -0.76, 0.01, -0.35, 0, 0.09], [0, -0.76, -0.3, -0.62, -0.4, 0.07], [0, -0.76, 0.3, -0.62, 0.4, 0.07]];
+            seams.forEach(([x0, y0, cx, cy, x1, y1]) => {
+                c.beginPath(); c.moveTo(x0, y0); c.quadraticCurveTo(cx, cy, x1, y1);
+                c.strokeStyle = 'rgba(0,0,0,0.5)'; c.lineWidth = 0.012; c.stroke();
+                c.save(); c.setLineDash([0.018, 0.012]); c.strokeStyle = 'rgba(200,215,240,0.35)'; c.lineWidth = 0.005;
+                [-0.014, 0.014].forEach(o => { c.beginPath(); c.moveTo(x0 + o, y0); c.quadraticCurveTo(cx + o, cy, x1 + o, y1); c.stroke(); });
+                c.restore();
+            });
+            c.restore();
+            [-1, 1].forEach(s => {
+                c.beginPath(); c.arc(0.27 * s, -0.5, 0.016, 0, Math.PI * 2);
+                c.fillStyle = '#050a14'; c.fill(); c.strokeStyle = 'rgba(200,215,240,0.4)'; c.lineWidth = 0.005; c.stroke();
+            });
+            const bg = c.createRadialGradient(-0.01, -0.775, 0.002, 0, -0.76, 0.045);
+            bg.addColorStop(0, '#3d5a8a'); bg.addColorStop(1, '#0b1322');
+            c.fillStyle = bg; c.beginPath(); c.arc(0, -0.76, 0.04, 0, Math.PI * 2); c.fill();
+
+            // Logo bordir
+            c.save();
+            c.shadowColor = 'rgba(0,0,0,0.6)'; c.shadowBlur = 3 * dpr; c.shadowOffsetY = 1 * dpr;
+            starPath(c, -0.01, -0.32, 0.13);
+            c.fillStyle = '#f2f2f2'; c.fill();
+            c.restore();
+            starPath(c, -0.01, -0.32, 0.09); c.fillStyle = '#c62828'; c.fill();
+
+            // Visor
+            const visor = new Path2D();
+            visor.moveTo(-0.58, 0.02); sagTo(visor, -0.58, 0.02, 0.58, 0.02, 0.07);
+            visor.lineTo(0.64, 0.04); sagTo(visor, 0.64, 0.04, -0.64, 0.04, 0.19);
+            visor.closePath();
+            g = c.createLinearGradient(0, 0.05, 0, 0.24);
+            g.addColorStop(0, '#22375c'); g.addColorStop(1, '#0a1120');
+            c.fillStyle = g; withShadow(c, () => c.fill(visor));
+            texture(c, visor, 0.3);
+            c.save(); c.clip(visor); c.setLineDash([0.018, 0.012]); c.strokeStyle = 'rgba(200,215,240,0.3)'; c.lineWidth = 0.005;
+            [0.11, 0.135, 0.16].forEach(sg => { c.beginPath(); c.moveTo(-0.62, 0.035); sagTo(c, -0.62, 0.035, 0.62, 0.035, sg); c.stroke(); });
+            c.restore();
+            c.strokeStyle = '#04070d'; c.lineWidth = 0.022;
+            c.beginPath(); c.moveTo(-0.64, 0.04); sagTo(c, -0.64, 0.04, 0.64, 0.04, 0.19); c.stroke();
+        }
+
+        // ---------- 5. COWBOY (suede tan, cattleman crease, concho perak) ----------
+        function drawCowboy(c) {
+            contactShadow(c, 0.13, 0.82, 0.15, 0.45);
+            const brimOuter = p => {
+                p.moveTo(-0.98, -0.34);
+                p.quadraticCurveTo(-0.8, 0.1, 0, 0.15);
+                p.quadraticCurveTo(0.8, 0.1, 0.98, -0.34);
+            };
+            const brim = new Path2D();
+            brimOuter(brim);
+            brim.quadraticCurveTo(0.72, -0.2, 0, -0.2);
+            brim.quadraticCurveTo(-0.72, -0.2, -0.98, -0.34);
+            brim.closePath();
+            const brimGrad = () => {
+                const g = c.createLinearGradient(0, -0.34, 0, 0.15);
+                g.addColorStop(0, '#7a5230'); g.addColorStop(1, '#c09060');
+                return g;
+            };
+            c.fillStyle = brimGrad(); withShadow(c, () => c.fill(brim));
+            texture(c, brim, 0.45);
+
+            const crown = new Path2D();
+            crown.moveTo(-0.52, -0.02); crown.lineTo(-0.49, -0.5);
+            crown.quadraticCurveTo(-0.42, -0.7, -0.2, -0.68);
+            crown.quadraticCurveTo(0, -0.6, 0.2, -0.68);
+            crown.quadraticCurveTo(0.42, -0.7, 0.49, -0.5);
+            crown.lineTo(0.52, -0.02);
+            sagTo(crown, 0.52, -0.02, -0.52, -0.02, 0.08);
+            crown.closePath();
+            const g = c.createLinearGradient(-0.52, 0, 0.52, 0);
+            g.addColorStop(0, '#6e4a28'); g.addColorStop(0.3, '#d6a86e'); g.addColorStop(0.55, '#b88a55'); g.addColorStop(1, '#5e3e20');
+            c.fillStyle = g; withShadow(c, () => c.fill(crown));
+            c.save(); c.clip(crown);
+            [-1, 1].forEach(s => {
+                const pg = c.createRadialGradient(0.25 * s, -0.42, 0, 0.25 * s, -0.42, 0.18);
+                pg.addColorStop(0, 'rgba(60,35,15,0.4)'); pg.addColorStop(1, 'rgba(0,0,0,0)');
+                c.fillStyle = pg; c.fillRect(-1, -1, 2, 2);
+            });
+            const cg = c.createLinearGradient(0, -0.62, 0, -0.25);
+            cg.addColorStop(0, 'rgba(50,30,10,0.55)'); cg.addColorStop(1, 'rgba(0,0,0,0)');
+            c.strokeStyle = cg; c.lineWidth = 0.03;
+            c.beginPath(); c.moveTo(0, -0.61); c.quadraticCurveTo(0.015, -0.45, 0, -0.25); c.stroke();
+            c.restore();
+            shade(c, crown, -0.15, -0.45, 0.7, 0.4, 0.12);
+            texture(c, crown, 0.45);
+
+            // Pita kulit + concho
+            const band = new Path2D();
+            band.moveTo(-0.52, -0.02); sagTo(band, -0.52, -0.02, 0.52, -0.02, 0.08);
+            band.lineTo(0.515, -0.13); sagTo(band, 0.515, -0.13, -0.515, -0.13, 0.08);
+            band.closePath();
+            const bg = c.createLinearGradient(0, -0.13, 0, 0.06);
+            bg.addColorStop(0, '#5a3820'); bg.addColorStop(1, '#2a180b');
+            c.fillStyle = bg; c.fill(band);
+            c.save(); c.setLineDash([0.015, 0.01]); c.strokeStyle = 'rgba(230,200,150,0.55)'; c.lineWidth = 0.005;
+            [-0.115, -0.035].forEach(y0 => { c.beginPath(); c.moveTo(-0.51, y0); sagTo(c, -0.51, y0, 0.51, y0, 0.08); c.stroke(); });
+            c.restore();
+            const cx = -0.3, cy = sagY(cx, 0.52, -0.075, 0.08);
+            const sg = c.createRadialGradient(cx - 0.015, cy - 0.015, 0.003, cx, cy, 0.055);
+            sg.addColorStop(0, '#ffffff'); sg.addColorStop(0.5, '#c0c4cc'); sg.addColorStop(1, '#5f646e');
+            c.fillStyle = sg; c.beginPath(); c.arc(cx, cy, 0.05, 0, Math.PI * 2); c.fill();
+            gem(c, cx, cy, 0.018, 0.018, '#4dd0c4', '#00695c');
+
+            // Brim depan (menutup pangkal crown)
+            const lip = new Path2D();
+            brimOuter(lip);
+            lip.quadraticCurveTo(0.62, -0.08, 0.52, -0.02);
+            sagTo(lip, 0.52, -0.02, -0.52, -0.02, 0.08);
+            lip.quadraticCurveTo(-0.62, -0.08, -0.98, -0.34);
+            lip.closePath();
+            c.fillStyle = brimGrad(); c.fill(lip);
+            texture(c, lip, 0.45);
+            const edge = new Path2D(); brimOuter(edge);
+            c.strokeStyle = '#4e321a'; c.lineWidth = 0.02; c.stroke(edge);
+        }
+
+
+        // ================== STYLES (5 per aksesoris) ==================
+        const GLASSES = [
+            { name: 'ROUND CLASSIC', draw: drawRoundGlasses },
+            { name: 'AVIATOR GOLD', draw: drawAviator },
+            { name: 'HEART PINK', draw: drawHeartGlasses },
+            { name: 'CYBER VISOR', draw: drawCyberVisor },
+            { name: 'PIXEL THUG', draw: drawPixelThug }
+        ];
+        const HEART_STYLES = [
+            { name: 'MERAH', color: '#ff1744', light: '#ff8a9b' },
+            { name: 'PINK', color: '#ff4fa3', light: '#ffc1e0' },
+            { name: 'UNGU', color: '#9b4dff', light: '#d6b8ff' },
+            { name: 'EMAS', color: '#ffb300', light: '#fff1a8' },
+            { name: 'RAINBOW', rainbow: true }
+        ];
+        const HATS = [
+            { name: 'FEDORA', draw: drawFedora },
+            { name: 'ROYAL CROWN', draw: drawRoyalCrown },
+            { name: 'BEANIE', draw: drawBeanie },
+            { name: 'BASEBALL CAP', draw: drawCap },
+            { name: 'COWBOY', draw: drawCowboy }
+        ];
+        const STYLES = { glasses: GLASSES, hearts: HEART_STYLES, hat: HATS };
+        const LABEL = { glasses: 'GLASSES', hearts: 'HEART EYES', hat: 'HAT', binus: 'BINUS', capture: 'REC VIDEO' };
+        const GESTURE_COLOR = { glasses: '#00f0ff', hearts: '#ff1744', hat: '#ffd400', next: '#ffffff', prev: '#ffffff', binus: '#ffc107', capture: '#ff3b3b' };
+
+        const active = { glasses: false, hearts: false, hat: false };
+        const styleIdx = { glasses: 0, hearts: 0, hat: 0 };
+        const styleName = k => STYLES[k][styleIdx[k]].name;
+
+        // Sprite hati (glow sudah di-render) supaya ratusan partikel tetap ringan
+        const SPRITE_FILL = 0.625;   // porsi lebar sprite yang berisi hati
+        function makeHeartSprite(color, light) {
+            const c = document.createElement('canvas');
+            c.width = c.height = 128;
+            const g = c.getContext('2d');
+            heartPath(g, 64, 68, 80);
+            g.shadowColor = color; g.shadowBlur = 16;
+            const grad = g.createRadialGradient(52, 52, 4, 64, 64, 50);
+            grad.addColorStop(0, light); grad.addColorStop(1, color);
+            g.fillStyle = grad; g.fill();
+            g.shadowBlur = 0;
+            g.fillStyle = 'rgba(255,255,255,0.55)';
+            g.beginPath(); g.ellipse(46, 50, 8, 5, -0.6, 0, Math.PI * 2); g.fill();
+            return c;
+        }
+        HEART_STYLES.forEach(s => {
+            s.sprites = s.rainbow
+                ? Array.from({ length: 12 }, (_, i) => makeHeartSprite(`hsl(${i * 30},100%,55%)`, `hsl(${i * 30},100%,85%)`))
+                : [makeHeartSprite(s.color, s.light)];
+        });
+
+        // ================== HAND TRACKING ==================
+        let hands = [];                 // info tangan (koordinat layar, sudah di-smooth)
+        const smoothHands = {};
+        let showSkeleton = true;
+
+        function handInfo(p) {
+            const size = D(p[0], p[9]) || 1;
+            const ext = (tip, pip) => D(p[0], p[tip]) > D(p[0], p[pip]) * 1.1;
+            const curled = (tip, pip) => D(p[0], p[tip]) < D(p[0], p[pip]);
+            // Kelurusan telunjuk: jarak MCP->ujung dibagi panjang ruas (1 = lurus)
+            const seg = D(p[5], p[6]) + D(p[6], p[7]) + D(p[7], p[8]);
+            const others = ext(12, 10) + ext(16, 14) + ext(20, 18);
+            const ids = [0, 5, 9, 13, 17];
+            return {
+                p, size,
+                cx: ids.reduce((s, i) => s + p[i].x, 0) / ids.length,
+                cy: ids.reduce((s, i) => s + p[i].y, 0) / ids.length,
+                straight: seg ? D(p[5], p[8]) / seg : 0,
+                ok: D(p[4], p[8]) < size * CFG.OK_PINCH && others >= 2,
+                // Sign F: jempol + telunjuk bersentuhan, tengah/manis/kelingking lurus ke atas
+                fSign: D(p[4], p[8]) < size * CFG.OK_PINCH && others === 3 && p[12].y < p[0].y - size * 1.2,
+                okCenter: mid(p[4], p[8]),
+                fist: curled(8, 6) && curled(12, 10) && curled(16, 14) && curled(20, 18),
+                // Peace sign: telunjuk + tengah lurus, manis + kelingking menekuk, jempol tidak menjepit telunjuk
+                peace: ext(8, 6) && ext(12, 10) && curled(16, 14) && curled(20, 18) && D(p[4], p[8]) > size * 0.5,
+                open: ext(8, 6) && ext(12, 10) && ext(16, 14) && ext(20, 18)
+            };
+        }
+
+        function updateHands(hr) {
+            const handed = hr.handedness || hr.handednesses || [];
+            const seen = new Set();
+            const list = [];
+            (hr.landmarks || []).forEach((lm, i) => {
+                let key = (handed[i] && handed[i][0]) ? handed[i][0].categoryName : 'Hand';
+                if (seen.has(key)) key += '_' + i;
+                seen.add(key);
+                const raw = lm.map(toScreen);
+                let s = smoothHands[key];
+                if (!s) s = smoothHands[key] = raw.map(q => ({ ...q }));
+                else raw.forEach((q, j) => {
+                    s[j].x += (q.x - s[j].x) * CFG.HAND_LERP;
+                    s[j].y += (q.y - s[j].y) * CFG.HAND_LERP;
+                });
+                list.push(handInfo(s));
+            });
+            Object.keys(smoothHands).forEach(k => { if (!seen.has(k)) delete smoothHands[k]; });
+            hands = list;
+        }
+
+        // ================== FACE TRACKING ==================
+        let face = null, faceTime = 0;
+
+        function updateFace(res) {
+            const lm = res && res.faceLandmarks && res.faceLandmarks[0];
+            if (!lm) return;
+            const P = i => toScreen(lm[i]);
+            // Setelah mirror: mata kanan subjek (33/133) tampil di kanan layar
+            const raw = { eL: mid(P(362), P(263)), eR: mid(P(33), P(133)), top: P(10), sL: P(454), sR: P(234), nose: P(1), chin: P(152) };
+            if (raw.eL.x > raw.eR.x) {
+                [raw.eL, raw.eR] = [raw.eR, raw.eL];
+                [raw.sL, raw.sR] = [raw.sR, raw.sL];
+            }
+            const now = performance.now();
+            if (!face || now - faceTime > CFG.FACE_TIMEOUT) face = raw;
+            else Object.keys(raw).forEach(k => {
+                face[k].x += (raw[k].x - face[k].x) * CFG.FACE_LERP;
+                face[k].y += (raw[k].y - face[k].y) * CFG.FACE_LERP;
+            });
+            faceTime = now;
+        }
+
+        function faceGeom() {
+            if (!face || performance.now() - faceTime > CFG.FACE_TIMEOUT) return null;
+            const f = face;
+            const angle = Math.atan2(f.eR.y - f.eL.y, f.eR.x - f.eL.x);
+            const ux = Math.cos(angle), uy = Math.sin(angle);
+            const width = D(f.sL, f.sR);
+            // Lebar kepala: lebar wajah menyempit saat menoleh, tinggi wajah lebih stabil -> ambil yang terbesar
+            const head = Math.max(width, D(f.top, f.chin) * 0.82) * CFG.HAT_SCALE;
+            // Menoleh: hidung bergeser dari tengah wajah; topi digeser ke arah sebaliknya (sumbu tengkorak ada di belakang wajah)
+            const fc = mid(f.sL, f.sR);
+            const yaw = (f.nose.x - fc.x) * ux + (f.nose.y - fc.y) * uy;
+            return {
+                eL: f.eL, eR: f.eR, top: f.top,
+                cx: (f.eL.x + f.eR.x) / 2, cy: (f.eL.y + f.eR.y) / 2,
+                angle, eye: D(f.eL, f.eR), width, head,
+                hatX: f.top.x - ux * yaw * CFG.HAT_YAW_SHIFT,
+                hatY: f.top.y - uy * yaw * CFG.HAT_YAW_SHIFT
+            };
+        }
+
+        // ================== GESTURE DETECTION ==================
+        function detectGesture(fg) {
+            const g2 = hands.length >= 2 ? detectTwoHand(fg) : null;
+            if (g2) return g2;
+            return detectFSign(fg) || detectPeace();
+        }
+
+        // Peace sign satu tangan -> rekam video (hanya saat tidak sedang merekam / modal tertutup)
+        function detectPeace() {
+            if (!canCapture()) return null;
+            const p = hands.find(h => h.peace);
+            return p ? { type: 'capture', x: p.cx, y: p.cy } : null;
+        }
+
+        // Sign F satu tangan. Bentuknya sama dengan tanda OK untuk kacamata, jadi syaratnya:
+        // wajah terlihat, lingkaran jari jauh dari mata, dan tangan lain tidak sedang membuat tanda OK.
+        function detectFSign(fg) {
+            if (!fg) return null;
+            const f = hands.filter(h => h.fSign &&
+                D(h.okCenter, fg.eL) > fg.eye * CFG.F_EYE_CLEAR && D(h.okCenter, fg.eR) > fg.eye * CFG.F_EYE_CLEAR);
+            if (f.length !== 1) return null;
+            if (hands.some(h => h !== f[0] && h.ok)) return null;
+            return { type: 'binus', x: f[0].cx, y: f[0].cy };
+        }
+
+        function detectTwoHand(fg) {
+            const [A, B] = hands[0].cx < hands[1].cx ? [hands[0], hands[1]] : [hands[1], hands[0]];   // A = kiri layar, B = kanan layar
+            const s = (A.size + B.size) / 2;
+
+            // 1. Kacamata: dua tanda OK di depan mata
+            if (A.ok && B.ok) {
+                const ca = A.okCenter, cb = B.okCenter;
+                let near = Math.abs(ca.y - cb.y) < s * 0.8 && D(ca, cb) > s * 0.6;
+                if (near && fg) near = D(ca, fg.eL) < fg.eye * CFG.GLASSES_EYE_DIST && D(cb, fg.eR) < fg.eye * CFG.GLASSES_EYE_DIST;
+                if (near) return { type: 'glasses', ...mid(ca, cb) };
+            }
+
+            // 2 & 3. Hati / segitiga: ujung jari atas bersentuhan, ujung jempol bawah bersentuhan
+            let topD = Infinity, topPt = null;
+            [7, 8, 11, 12].forEach(a => [7, 8, 11, 12].forEach(b => {
+                const d = D(A.p[a], B.p[b]);
+                if (d < topD) { topD = d; topPt = mid(A.p[a], B.p[b]); }
+            }));
+            const thumbD = D(A.p[4], B.p[4]);
+            const thumbPt = mid(A.p[4], B.p[4]);
+            if (topD < s * CFG.TOUCH && thumbD < s * CFG.TOUCH &&
+                topPt.y < thumbPt.y - s * 0.25 && D(A.p[0], B.p[0]) > s * 0.9) {
+                const straight = (A.straight + B.straight) / 2;
+                return { type: straight >= CFG.STRAIGHT ? 'hat' : 'hearts', ...mid(topPt, thumbPt) };
+            }
+
+            // 4. Ganti style: satu tangan kepal, satu terbuka
+            if (B.fist && A.open) return { type: 'next', x: B.cx, y: B.cy };
+            if (A.fist && B.open) return { type: 'prev', x: A.cx, y: A.cy };
+            return null;
+        }
+
+        // Tahan -> trigger sekali, lalu harus dilepas dulu sebelum trigger lagi
+        const gest = { hold: null, time: 0, latched: null, lost: 0 };
+        const holdNeeded = t => (t === 'next' || t === 'prev') ? CFG.STYLE_HOLD : (t === 'capture' ? CFG.CAPTURE_HOLD : CFG.HOLD);
+
+        function processGesture(g, dtMs) {
+            if (!g) {
+                gest.lost += dtMs;
+                if (gest.lost > CFG.RELEASE_GRACE) { gest.hold = null; gest.time = 0; gest.latched = null; }
+                return;
+            }
+            gest.lost = 0;
+            if (g.type === gest.latched) return;
+            if (g.type !== gest.hold) { gest.hold = g.type; gest.time = 0; }
+            gest.time += dtMs;
+            if (gest.time >= holdNeeded(g.type)) {
+                fire(g.type);
+                gest.latched = g.type; gest.hold = null; gest.time = 0;
+            }
+        }
+
+        function fire(type) {
+            if (type === 'next' || type === 'prev') { cycleStyle(type === 'next' ? 1 : -1); return; }
+            if (type === 'binus') { startParty(performance.now()); return; }
+            if (type === 'capture') { if (canCapture()) startCountdown(); return; }
+            active[type] = !active[type];
+            if (!active[type] && type === 'hearts') hearts.length = 0;
+            toast(active[type] ? `${LABEL[type]} ON // ${styleName(type)}` : `${LABEL[type]} OFF`);
+            updateStats();
+        }
+
+        // Ganti style semua aksesoris yang aktif (kalau belum ada yang aktif, semua ikut berganti)
+        function cycleStyle(dir) {
+            let targets = Object.keys(active).filter(k => active[k]);
+            if (!targets.length) targets = Object.keys(active);
+            targets.forEach(k => { styleIdx[k] = (styleIdx[k] + dir + STYLES[k].length) % STYLES[k].length; });
+            toast(targets.map(k => `${LABEL[k]}: ${styleName(k)}`).join(' | '));
+            updateStats();
+        }
+
+        // ================== HEART PARTICLES ==================
+        const hearts = [];
+        let heartAcc = 0;
+
+        function spawnHearts(fg, dt) {
+            heartAcc += dt * CFG.HEART_RATE;
+            while (heartAcc >= 1) {
+                heartAcc -= 1;
+                spawnHeart(fg.eL, -1, fg);
+                spawnHeart(fg.eR, 1, fg);
+            }
+        }
+
+        function spawnHeart(e, side, fg) {
+            if (hearts.length >= CFG.MAX_HEARTS) return;
+            const k = fg.eye / 100;
+            const sprites = HEART_STYLES[styleIdx.hearts].sprites;
+            hearts.push({
+                x: e.x, y: e.y,
+                vx: side * (30 + Math.random() * 100) * k,
+                vy: -(60 + Math.random() * 120) * k,
+                s0: fg.eye * (0.28 + Math.random() * 0.25),
+                life: 0, max: 1.6 + Math.random() * 0.9,
+                rot: (Math.random() - 0.5) * 0.6, vr: (Math.random() - 0.5) * 1.5,
+                seed: Math.random() * 10, k,
+                img: sprites[(Math.random() * sprites.length) | 0]
+            });
+        }
+
+        function updateDrawHearts(dt) {
+            for (let i = hearts.length - 1; i >= 0; i--) {
+                const p = hearts[i];
+                p.life += dt;
+                if (p.life >= p.max) { hearts.splice(i, 1); continue; }
+                p.vx *= Math.max(0, 1 - 1.2 * dt);
+                p.vy -= 25 * p.k * dt;                       // makin lama makin naik (melayang)
+                p.x += (p.vx + Math.sin(p.life * 5 + p.seed) * 25 * p.k) * dt;
+                p.y += p.vy * dt;
+                p.rot += p.vr * dt;
+                const sz = p.s0 * (0.35 + 0.65 * Math.min(1, p.life / 0.3)) / SPRITE_FILL;
+                const fade = p.life > p.max * 0.6 ? 1 - (p.life - p.max * 0.6) / (p.max * 0.4) : 1;
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, fade);
+                ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+                ctx.drawImage(p.img, -sz / 2, -sz / 2, sz, sz);
+                ctx.restore();
+            }
+        }
+
+        // Hati berdenyut di atas tiap mata
+        function drawEyeHearts(fg, t) {
+            const sprites = HEART_STYLES[styleIdx.hearts].sprites;
+            const img = sprites[Math.floor(t * 6) % sprites.length];
+            const sz = fg.eye * 0.5 * (1 + 0.1 * Math.sin(t * 8)) / SPRITE_FILL;
+            [fg.eL, fg.eR].forEach(e => {
+                ctx.save();
+                ctx.translate(e.x, e.y); ctx.rotate(fg.angle);
+                ctx.drawImage(img, -sz / 2, -sz / 2, sz, sz);
+                ctx.restore();
+            });
+        }
+
+        // ================== BINUS LOGO (pre-render ke offscreen canvas) ==================
+        const LOGO_W = 1400, LOGO_H = 660;
+        const logoCanvas = document.createElement('canvas');
+        logoCanvas.width = LOGO_W; logoCanvas.height = LOGO_H;
+        const FONT_TITLE = '"Lilita One", "Arial Black", Impact, sans-serif';
+
+        function layer() { const c = document.createElement('canvas'); c.width = LOGO_W; c.height = LOGO_H; return [c, c.getContext('2d')]; }
+
+        function splash(c, x, y, a, color, s = 1) {
+            c.save(); c.translate(x, y); c.rotate(a); c.scale(s, s);
+            c.fillStyle = color;
+            c.beginPath(); c.moveTo(0, -46); c.quadraticCurveTo(15, -6, 0, 12); c.quadraticCurveTo(-15, -6, 0, -46); c.fill();
+            c.beginPath(); c.arc(0, -64, 6, 0, Math.PI * 2); c.fill();
+            c.restore();
+        }
+
+        // Teks bertumpuk: bayangan, outline gelap, outline warna, outline dalam, isi
+        function layeredText(c, text, x, y, o) {
+            c.lineJoin = 'round'; c.miterLimit = 2;
+            c.save();
+            c.shadowColor = 'rgba(0,0,0,0.45)'; c.shadowBlur = 22; c.shadowOffsetY = 10;
+            c.lineWidth = o.outer; c.strokeStyle = o.outerColor; c.strokeText(text, x, y);
+            c.restore();
+            c.lineWidth = o.mid; c.strokeStyle = o.midColor; c.strokeText(text, x, y);
+            if (o.inner) { c.lineWidth = o.inner; c.strokeStyle = o.innerColor; c.strokeText(text, x, y); }
+            c.fillStyle = o.fill; c.fillText(text, x, y);
+        }
+
+        function renderLogo() {
+            const c = logoCanvas.getContext('2d');
+            c.clearRect(0, 0, LOGO_W, LOGO_H);
+            const cx = LOGO_W / 2;
+
+            // Cipratan di atas tulisan
+            splash(c, 300, 160, -0.75, '#c62828', 1.1); splash(c, 360, 120, -0.3, '#d4a017', 0.8);
+            splash(c, 1040, 105, 0.35, '#d4a017', 0.9); splash(c, 1110, 140, 0.8, '#c62828', 1.15);
+
+            // ---- BINUS (putih-perak, outline emas, miring) ----
+            const by = 380;
+            const [L, b] = layer();
+            b.font = `250px ${FONT_TITLE}`; b.textAlign = 'center'; b.textBaseline = 'alphabetic';
+            b.setTransform(1, 0, -0.2, 1, 0.2 * (by - 100), 0);
+            const gold = b.createLinearGradient(0, by - 220, 0, by + 20);
+            gold.addColorStop(0, '#fff1b0'); gold.addColorStop(0.35, '#e0a526'); gold.addColorStop(0.65, '#9c6510'); gold.addColorStop(1, '#f3c552');
+            layeredText(b, 'BINUS', cx, by, { outer: 46, outerColor: '#4a2a08', mid: 30, midColor: gold, inner: 10, innerColor: '#fffaf0', fill: '#ffffff' });
+            // Isi perak + goresan kuas (hanya di area isi)
+            const [F, f] = layer();
+            f.font = b.font; f.textAlign = 'center'; f.setTransform(1, 0, -0.2, 1, 0.2 * (by - 100), 0);
+            const silver = f.createLinearGradient(0, by - 200, 0, by);
+            silver.addColorStop(0, '#ffffff'); silver.addColorStop(0.55, '#f1edf6'); silver.addColorStop(1, '#c8c1d8');
+            f.fillStyle = silver; f.fillText('BINUS', cx, by);
+            f.setTransform(1, 0, 0, 1, 0, 0);
+            f.globalCompositeOperation = 'source-atop';
+            for (let i = 0; i < 26; i++) {
+                const y = by - 200 + i * 8 + Math.sin(i * 1.7) * 3;
+                f.strokeStyle = i % 3 ? 'rgba(150,140,175,0.16)' : 'rgba(255,255,255,0.55)';
+                f.lineWidth = 2 + (i % 4);
+                f.beginPath(); f.moveTo(cx - 520, y); f.quadraticCurveTo(cx, y - 14, cx + 520, y + 6); f.stroke();
+            }
+            const shine = f.createLinearGradient(0, by - 200, 0, by - 110);
+            shine.addColorStop(0, 'rgba(255,255,255,0.7)'); shine.addColorStop(1, 'rgba(255,255,255,0)');
+            f.fillStyle = shine; f.fillRect(0, by - 220, LOGO_W, 110);
+            b.setTransform(1, 0, 0, 1, 0, 0);
+            b.drawImage(F, 0, 0);
+            c.drawImage(L, 0, 0);
+
+            // ---- Sapuan kuas merah di bawah baris kedua ----
+            const sw = c.createLinearGradient(cx - 480, 0, cx + 460, 0);
+            sw.addColorStop(0, '#7f0000'); sw.addColorStop(0.4, '#e53935'); sw.addColorStop(1, '#8e0000');
+            c.save();
+            c.shadowColor = 'rgba(0,0,0,0.35)'; c.shadowBlur = 16; c.shadowOffsetY = 8;
+            c.fillStyle = sw;
+            const swoosh = new Path2D();
+            swoosh.moveTo(cx - 540, 590);
+            swoosh.quadraticCurveTo(cx - 100, 466, cx + 500, 476);
+            swoosh.quadraticCurveTo(cx + 430, 520, cx + 340, 542);
+            swoosh.quadraticCurveTo(cx - 80, 604, cx - 540, 590);
+            swoosh.closePath();
+            c.fillStyle = sw; c.fill(swoosh);
+            c.restore();
+            // Serat kuas
+            c.save(); c.clip(swoosh);
+            for (let i = 0; i < 14; i++) {
+                c.strokeStyle = i % 2 ? 'rgba(255,255,255,0.14)' : 'rgba(60,0,0,0.25)';
+                c.lineWidth = 2 + (i % 3);
+                c.beginPath(); c.moveTo(cx - 540, 560 + i * 4); c.quadraticCurveTo(cx - 60, 470 + i * 8, cx + 520, 470 + i * 6); c.stroke();
+            }
+            c.restore();
+            c.strokeStyle = '#ffca28'; c.lineWidth = 8; c.lineCap = 'round';
+            c.beginPath(); c.moveTo(cx - 330, 580); c.quadraticCurveTo(cx, 538, cx + 410, 516); c.stroke();
+
+            // ---- @Medan (putih) + Mantap Kaleee (kuning-emas), outline merah ----
+            const ly = 520;
+            c.save();
+            c.font = `112px ${FONT_TITLE}`; c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+            const t1 = '@Medan', t2 = 'Mantap Kaleee', gap = 26;
+            const w1 = c.measureText(t1).width, w2 = c.measureText(t2).width;
+            const scale = Math.min(1, 1180 / (w1 + gap + w2));
+            const x0 = cx - (w1 + gap + w2) * scale / 2;
+            c.setTransform(scale, 0, -0.12 * scale, scale, x0 + 0.12 * scale * (ly - 40), ly - ly * scale);
+            const yellow = c.createLinearGradient(0, ly - 95, 0, ly + 10);
+            yellow.addColorStop(0, '#fffde7'); yellow.addColorStop(0.35, '#ffe14d'); yellow.addColorStop(1, '#ff9800');
+            const opt = { outer: 34, outerColor: '#4d0606', mid: 20, midColor: '#e53935' };
+            layeredText(c, t1, 0, ly, { ...opt, fill: '#ffffff' });
+            layeredText(c, t2, w1 + gap, ly, { ...opt, fill: yellow });
+            c.restore();
+        }
+
+        renderLogo();
+        // Render ulang setelah web font siap (Lilita One + Kaushan Script)
+        window.addEventListener('load', () => {
+            if (!document.fonts) return;
+            document.fonts.load(`250px ${FONT_TITLE}`).then(renderLogo).catch(() => {});
+        });
+
+        // ================== CONFETTI + CELEBRATION ==================
+        const CONFETTI_COLORS = ['#e53935', '#ffc107', '#ffffff', '#1e88e5', '#43a047', '#ff4fa3', '#ff9800'];
+        const confetti = [];
+        const party = { start: -1, until: -1, x: 0, y: 0, seen: false };
+        let rainAcc = 0;
+
+        function addConfetti(x, y, vx, vy) {
+            if (confetti.length >= CFG.MAX_CONFETTI) return;
+            const k = H / 720;
+            const shape = Math.random() < 0.6 ? 0 : (Math.random() < 0.5 ? 1 : 2);   // 0 kotak, 1 bulat, 2 pita panjang
+            confetti.push({
+                x, y, vx, vy, k, shape,
+                w: (shape === 2 ? 5 : 9 + Math.random() * 6) * k,
+                h: (shape === 2 ? 22 + Math.random() * 14 : 6 + Math.random() * 6) * k,
+                color: CONFETTI_COLORS[(Math.random() * CONFETTI_COLORS.length) | 0],
+                rot: Math.random() * Math.PI * 2, vr: (Math.random() - 0.5) * 10,
+                phase: Math.random() * Math.PI * 2, vp: 6 + Math.random() * 8, life: 0
+            });
+        }
+
+        function burstConfetti() {
+            const k = H / 720;
+            const ox = party.seen ? party.x : W / 2, oy = party.seen ? party.y : H * 0.3;
+            for (let i = 0; i < 150; i++) {
+                const a = -Math.PI * (0.05 + Math.random() * 0.9), sp = (350 + Math.random() * 650) * k;
+                addConfetti(ox, oy, Math.cos(a) * sp, Math.sin(a) * sp);
+            }
+            // Meriam confetti dari kedua sudut bawah
+            [[0, 1], [W, -1]].forEach(([x, s]) => {
+                for (let i = 0; i < 90; i++) {
+                    const a = -Math.PI / 2 + s * (0.35 + Math.random() * 0.35), sp = (900 + Math.random() * 600) * k;
+                    addConfetti(x, H, Math.cos(a) * sp, Math.sin(a) * sp);
+                }
+            });
+        }
+
+        function startParty(now) {
+            const wasActive = now < party.until + CFG.PARTY_FADE;
+            if (!wasActive) party.start = now;            // animasi pop hanya saat baru muncul
+            party.until = now + CFG.PARTY_DURATION;
+            burstConfetti();
+        }
+
+        function updateDrawConfetti(dt, raining) {
+            if (raining) {
+                rainAcc += dt * CFG.CONFETTI_RAIN;
+                while (rainAcc >= 1) { rainAcc -= 1; addConfetti(Math.random() * W, -20, (Math.random() - 0.5) * 60, 60 + Math.random() * 80); }
+            }
+            for (let i = confetti.length - 1; i >= 0; i--) {
+                const p = confetti[i];
+                p.life += dt;
+                p.vy += 900 * p.k * dt;
+                const drag = Math.max(0, 1 - 1.6 * dt);
+                p.vx *= drag; p.vy *= drag;
+                p.vy = Math.min(p.vy, 240 * p.k);              // kecepatan jatuh maksimum (melayang)
+                p.phase += p.vp * dt;
+                p.x += (p.vx + Math.sin(p.phase * 0.5) * 40 * p.k) * dt;
+                p.y += p.vy * dt;
+                p.rot += p.vr * dt;
+                if (p.y > H + 40 || p.life > 9) { confetti.splice(i, 1); continue; }
+                ctx.save();
+                ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+                ctx.scale(1, Math.cos(p.phase));              // efek kertas berputar 3D
+                ctx.fillStyle = p.color;
+                if (p.shape === 1) { ctx.beginPath(); ctx.arc(0, 0, p.w * 0.45, 0, Math.PI * 2); ctx.fill(); }
+                else ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+                ctx.restore();
+            }
+        }
+
+        const easeOutBack = x => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+
+        // Posisi tulisan: di atas kepala (di atas topi kalau topi aktif), diperhalus
+        function updatePartyAnchor(fg) {
+            if (!fg) return;
+            const tx = fg.hatX, ty = fg.hatY - fg.head * (active.hat ? 1.1 : 0.72);
+            if (!party.seen) { party.x = tx; party.y = ty; party.seen = true; }
+            party.x += (tx - party.x) * 0.25; party.y += (ty - party.y) * 0.25;
+            party.headW = fg.head;
+        }
+
+        function drawPartyText(now) {
+            const t = (now - party.start) / 1000;
+            let alpha = 1;
+            if (now > party.until) alpha = 1 - (now - party.until) / CFG.PARTY_FADE;
+            if (alpha <= 0) return;
+            // Besar: ikut ukuran kepala, minimal 60% dan maksimal 92% lebar layar
+            const w = Math.min(W * 0.92, Math.max(W * 0.6, (party.headW || W * 0.3) * CFG.LOGO_HEAD_WIDTH));
+            const h = w * LOGO_H / LOGO_W;
+            const s = easeOutBack(Math.min(1, t / 0.55));
+            const bob = Math.sin(t * 3) * h * 0.02;
+            // Tepi bawah tulisan di anchor; jaga supaya tidak keluar layar
+            let cx = Math.min(W - w / 2 - 8, Math.max(w / 2 + 8, party.x));
+            let cy = Math.max(h / 2 + 8, party.y - h / 2) + bob;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.translate(cx, cy); ctx.rotate(Math.sin(t * 2) * 0.025 - 0.02); ctx.scale(s, s);
+            ctx.drawImage(logoCanvas, -w / 2, -h / 2, w, h);
+            // Kilau bintang di sekitar tulisan
+            for (let i = 0; i < 6; i++) {
+                const a = 0.5 + 0.5 * Math.sin(t * 5 + i * 1.9);
+                ctx.fillStyle = `rgba(255,255,255,${0.9 * a})`;
+                starPath(ctx, (Math.sin(i * 2.3) * 0.48) * w, (Math.cos(i * 1.7) * 0.42) * h, (6 + 8 * a) * (w / 700), 4);
+                ctx.fill();
+            }
+            ctx.restore();
+        }
+
+        // ================== RENDER ==================
+        function drawGlasses(fg, t) {
+            ctx.save();
+            ctx.translate(fg.cx, fg.cy); ctx.rotate(fg.angle); ctx.scale(fg.eye, fg.eye);
+            GLASSES[styleIdx.glasses].draw(ctx, t);
+            ctx.restore();
+        }
+
+        function drawHat(fg, t) {
+            ctx.save();
+            ctx.translate(fg.hatX, fg.hatY); ctx.rotate(fg.angle); ctx.scale(fg.head, fg.head);
+            ctx.translate(0, CFG.HAT_OFFSET);
+            HATS[styleIdx.hat].draw(ctx, t);
+            ctx.restore();
+        }
+
+        function drawSkeletons() {
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,106,213,0.45)'; ctx.lineWidth = 1.5;
+            hands.forEach(h => {
+                ctx.beginPath();
+                CONNECTIONS.forEach(([a, b]) => { ctx.moveTo(h.p[a].x, h.p[a].y); ctx.lineTo(h.p[b].x, h.p[b].y); });
+                ctx.stroke();
+                ctx.fillStyle = '#fff';
+                h.p.forEach(q => ctx.fillRect(q.x - 2, q.y - 2, 4, 4));
+            });
+            ctx.restore();
+        }
+
+        function drawHUDCircle(x, y, progress, color) {
+            ctx.save();
+            ctx.shadowBlur = 10; ctx.shadowColor = color;
+            ctx.beginPath();
+            ctx.arc(x, y, 35, -Math.PI / 2, (-Math.PI / 2) + (Math.PI * 2 * progress));
+            ctx.lineWidth = 5; ctx.strokeStyle = color; ctx.stroke();
+            ctx.setLineDash([3, 5]);
+            ctx.beginPath(); ctx.arc(x, y, 30, 0, Math.PI * 2); ctx.lineWidth = 1; ctx.stroke();
+            ctx.restore();
+        }
+
+        // ================== UI ==================
+        let toastTimer = null;
+        function toast(msg) {
+            toastEl.textContent = msg;
+            toastEl.classList.add('show');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1600);
+        }
+
+        function updateStats() {
+            Object.keys(statEls).forEach(k => {
+                const el = statEls[k];
+                el.textContent = active[k] ? `ON // ${styleName(k)} (${styleIdx[k] + 1}/${STYLES[k].length})` : `OFF // ${styleName(k)}`;
+                el.className = active[k] ? 'on' : 'off';
+            });
+        }
+
+        let uiTick = 0;
+        function updateMode(g, fg) {
+            if (++uiTick % 8) return;
+            let s;
+            if (capState === 'countdown') s = 'REC: STAND BY...';
+            else if (capState === 'recording') s = 'REC: RECORDING';
+            else if (capState === 'modal') s = 'REC: UPLOADING / QR';
+            else if (g && gest.hold === g.type) s = (g.type === 'next' || g.type === 'prev') ? `STYLE_${g.type.toUpperCase()}: LOCKING...` : `${LABEL[g.type]}: LOCKING...`;
+            else if (hands.length) s = `TRACKING ${hands.length} HAND${hands.length > 1 ? 'S' : ''}`;
+            else s = 'READY';
+            modeEl.textContent = `${s} | FACE: ${fg ? 'LOCKED' : 'SEARCHING'}`;
+        }
+
+        // ================== VIDEO CAPTURE (3 detik) + UPLOAD + QR ==================
+        const APP = Object.assign({ SUPABASE_URL: '', SUPABASE_ANON_KEY: '', BUCKET: 'fog-glass', FOLDER: 'videos', VIEWER_URL: '' }, window.FILTER_SYNC_CONFIG || {});
+        const supa = (APP.SUPABASE_URL && APP.SUPABASE_ANON_KEY && window.supabase)
+            ? window.supabase.createClient(APP.SUPABASE_URL, APP.SUPABASE_ANON_KEY, { auth: { persistSession: false } })
+            : null;
+
+        const countdownEl = document.getElementById('countdown');
+        const recIndicator = document.getElementById('rec_indicator');
+        const recText = document.getElementById('rec_text');
+        const recBar = document.getElementById('rec_bar');
+        const modalEl = document.getElementById('video_modal');
+        const previewEl = document.getElementById('video_preview');
+        const qrBox = document.getElementById('qr_box');
+        const uploadStatusEl = document.getElementById('upload_status');
+        const saveLocalEl = document.getElementById('save_local');
+        const modalTimerEl = document.getElementById('modal_timer');
+        const closeBtn = document.getElementById('close_modal');
+
+        // Canvas khusus rekaman: salinan layar TANPA skeleton / ring HUD, resolusi tetap
+        const recCanvas = document.createElement('canvas');
+        const recCtx = recCanvas.getContext('2d');
+
+        let capState = 'idle';          // idle | countdown | recording | modal
+        let recorder = null, recChunks = [], recStart = 0, recCaption = '';
+        let countdownTimer = null, modalTimer = null, videoUrl = null;
+
+        function canCapture() { return capState === 'idle' && !!video.videoWidth && typeof MediaRecorder !== 'undefined'; }
+        const pad2 = n => String(n).padStart(2, '0');
+
+        function randomId() {
+            if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+            const b = crypto.getRandomValues(new Uint8Array(16));
+            return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+        }
+
+        // MP4 diutamakan (bisa diputar di iPhone), fallback ke WebM
+        function pickMime() {
+            const list = ['video/mp4;codecs=avc1.42E01F', 'video/mp4;codecs=avc1', 'video/mp4',
+                          'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+            return list.find(t => MediaRecorder.isTypeSupported(t)) || '';
+        }
+
+        function startCountdown() {
+            if (!canCapture()) return;
+            capState = 'countdown';
+            let n = CFG.COUNTDOWN;
+            countdownEl.style.display = 'flex';
+            countdownEl.textContent = n;
+            countdownTimer = setInterval(() => {
+                n--;
+                if (n > 0) { countdownEl.textContent = n; return; }
+                clearInterval(countdownTimer);
+                countdownEl.style.display = 'none';
+                countdownEl.textContent = '';
+                startRecording();
+            }, 1000);
+        }
+
+        function startRecording() {
+            // Ukuran genap (syarat encoder), aspek sama dengan layar
+            const s = CFG.REC_LONG_SIDE / Math.max(W, H);
+            recCanvas.width = Math.round(W * s / 2) * 2;
+            recCanvas.height = Math.round(H * s / 2) * 2;
+            const d = new Date();
+            recCaption = `FILTER_SYNC // ${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+            recordFrame();
+
+            const mimeType = pickMime();
+            let stream;
+            try {
+                stream = recCanvas.captureStream(CFG.REC_FPS);
+                recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: CFG.REC_BITRATE } : { videoBitsPerSecond: CFG.REC_BITRATE });
+            } catch (err) {
+                console.error(err);
+                toast('REC NOT SUPPORTED IN THIS BROWSER');
+                capState = 'idle';
+                return;
+            }
+            recChunks = [];
+            recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
+            recorder.onstop = () => {
+                stream.getTracks().forEach(tr => tr.stop());
+                recIndicator.style.display = 'none';
+                const type = (recorder.mimeType || mimeType || 'video/webm').split(';')[0];
+                const blob = new Blob(recChunks, { type });
+                finishRecording(blob, type, d);
+            };
+            capState = 'recording';
+            recStart = performance.now();
+            recIndicator.style.display = 'block';
+            recorder.start(250);
+            setTimeout(() => { if (recorder && recorder.state === 'recording') recorder.stop(); }, CFG.REC_SECONDS * 1000);
+        }
+
+        // Dipanggil dari frame() sebelum skeleton/HUD digambar
+        function recordFrame() {
+            const rw = recCanvas.width, rh = recCanvas.height;
+            recCtx.drawImage(canvas, 0, 0, rw, rh);
+            recCtx.save();
+            recCtx.font = `bold ${Math.round(rh * 0.026)}px "Courier New", monospace`;
+            recCtx.textAlign = 'right'; recCtx.textBaseline = 'bottom';
+            recCtx.shadowBlur = 8; recCtx.shadowColor = '#ff6ad5';
+            recCtx.fillStyle = 'rgba(255,230,250,0.92)';
+            recCtx.fillText(recCaption, rw - rh * 0.03, rh - rh * 0.03);
+            recCtx.restore();
+        }
+
+        function updateRecIndicator(now) {
+            if (capState !== 'recording') return;
+            const el = Math.min(CFG.REC_SECONDS, (now - recStart) / 1000);
+            recText.textContent = `REC ${(CFG.REC_SECONDS - el).toFixed(1)}s`;
+            recBar.style.width = `${(el / CFG.REC_SECONDS) * 100}%`;
+        }
+
+        function finishRecording(blob, type, d) {
+            const ext = type === 'video/mp4' ? 'mp4' : 'webm';
+            const fileName = `filter-sync-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}.${ext}`;
+            showModal(blob, fileName);
+            if (!blob.size) { qrBox.textContent = 'RECORD FAILED'; uploadStatusEl.textContent = ''; return; }
+            uploadVideo(blob, type, ext, d);
+        }
+
+        function showModal(blob, fileName) {
+            capState = 'modal';
+            if (videoUrl) URL.revokeObjectURL(videoUrl);
+            videoUrl = URL.createObjectURL(blob);
+            previewEl.src = videoUrl;
+            previewEl.play().catch(() => {});
+            saveLocalEl.href = videoUrl;
+            saveLocalEl.download = fileName;
+            qrBox.textContent = 'GENERATING...';
+            uploadStatusEl.textContent = 'UPLOADING...';
+            modalEl.classList.add('open');
+            closeBtn.focus();
+            let left = CFG.MODAL_TIMEOUT;
+            modalTimerEl.textContent = `AUTO-CLOSE IN ${left}s`;
+            clearInterval(modalTimer);
+            modalTimer = setInterval(() => {
+                left--;
+                modalTimerEl.textContent = `AUTO-CLOSE IN ${left}s`;
+                if (left <= 0) closeModal();
+            }, 1000);
+        }
+
+        function closeModal() {
+            clearInterval(modalTimer);
+            modalEl.classList.remove('open');
+            previewEl.pause();
+            capState = 'idle';
+        }
+
+        // VIEWER_URL dari config.js, atau video.html di folder yang sama dengan halaman ini
+        function viewerBase() { return APP.VIEWER_URL || new URL('video.html', location.href).href; }
+        function isLocalViewer(u) { return u.protocol === 'file:' || ['localhost', '127.0.0.1', '[::1]', '::1'].includes(u.hostname); }
+
+        async function uploadVideo(blob, type, ext, d) {
+            if (!supa) {
+                qrBox.textContent = 'SUPABASE NOT CONFIGURED';
+                uploadStatusEl.textContent = 'Isi config.js untuk QR. Gunakan SAVE LOCAL.';
+                return;
+            }
+            const day = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+            const path = `${APP.FOLDER}/${day}/${randomId()}.${ext}`;
+            try {
+                const { error } = await supa.storage.from(APP.BUCKET).upload(path, blob, {
+                    contentType: type, cacheControl: '3600', upsert: false
+                });
+                if (error) throw error;
+                if (capState !== 'modal') return;          // modal sudah ditutup
+                const viewer = new URL(viewerBase());
+                viewer.searchParams.set('v', path);
+                renderQR(viewer.href);
+                console.info('Viewer:', viewer.href);
+                uploadStatusEl.textContent = isLocalViewer(viewer)
+                    ? 'WARNING: video.html masih di localhost/file, HP tidak bisa membukanya. Isi VIEWER_URL di config.js.'
+                    : 'SCAN TO SAVE / SHARE';
+            } catch (err) {
+                console.error('Upload failed:', err);
+                qrBox.textContent = 'UPLOAD FAILED';
+                const msg = err.message || String(err);
+                uploadStatusEl.textContent = /mime|size|policy|security/i.test(msg)
+                    ? `ERROR: ${msg}. Sudah jalankan supabase-video-setup.sql?`
+                    : `ERROR: ${msg}`;
+            }
+        }
+
+        function renderQR(url) {
+            const qr = qrcode(0, 'M');
+            qr.addData(url);
+            qr.make();
+            const img = new Image();
+            img.src = qr.createDataURL(8, 2);
+            img.alt = 'QR code to save or share the video';
+            qrBox.replaceChildren(img);
+        }
+
+        document.getElementById('rec_btn').addEventListener('click', e => { e.currentTarget.blur(); startCountdown(); });
+        closeBtn.addEventListener('click', closeModal);
+
+        // ================== CAMERA + MEDIAPIPE TASKS ==================
+        let handLandmarker = null, faceLandmarker = null;
+        let lastVideoTime = -1, lastVisionTs = 0, visionTick = 0;
+
+        async function startCamera() {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false
+            });
+            video.srcObject = stream;
+            await video.play();
+        }
+
+        async function initVision() {
+            modeEl.textContent = 'LOADING MODELS...';
+            const { FilesetResolver, HandLandmarker, FaceLandmarker } = await import(`${VISION_URL}/vision_bundle.mjs`);
+            const fileset = await FilesetResolver.forVisionTasks(`${VISION_URL}/wasm`);
+            const create = async (Task, modelAssetPath, options) => {
+                try {
+                    return await Task.createFromOptions(fileset, { baseOptions: { modelAssetPath, delegate: 'GPU' }, runningMode: 'VIDEO', ...options });
+                } catch (e) {
+                    console.warn('GPU delegate failed, falling back to CPU', e);
+                    return await Task.createFromOptions(fileset, { baseOptions: { modelAssetPath, delegate: 'CPU' }, runningMode: 'VIDEO', ...options });
+                }
+            };
+            handLandmarker = await create(HandLandmarker, HAND_MODEL, {
+                numHands: 2, minHandDetectionConfidence: 0.6, minHandPresenceConfidence: 0.6, minTrackingConfidence: 0.6
+            });
+            faceLandmarker = await create(FaceLandmarker, FACE_MODEL, { numFaces: 1 });
+        }
+
+        // Tangan tiap frame video baru, wajah tiap 2 frame
+        function runVision(now) {
+            if (!handLandmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+            lastVideoTime = video.currentTime;
+            const ts = Math.max(now, lastVisionTs + 1);
+            lastVisionTs = ts;
+            updateHands(handLandmarker.detectForVideo(video, ts));
+            if (faceLandmarker && (++visionTick % 2 === 0)) updateFace(faceLandmarker.detectForVideo(video, ts));
+        }
+
+        // ================== MAIN LOOP ==================
+        let lastFrame = performance.now();
+        function frame(now) {
+            requestAnimationFrame(frame);
+            const dtMs = Math.min(50, now - lastFrame);
+            lastFrame = now;
+            const dt = dtMs / 1000, t = now / 1000;
+            if (!video.videoWidth) return;
+
+            computeLayout();
+            runVision(now);
+            const fg = faceGeom();
+            const g = detectGesture(fg);
+            processGesture(g, dtMs);
+            updatePartyAnchor(fg);
+            // Selama sign F masih ditahan, tulisan tetap tampil
+            if (g && g.type === 'binus' && gest.latched === 'binus') party.until = Math.max(party.until, now + 1500);
+            const partyOn = now < party.until + CFG.PARTY_FADE;
+
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.save();
+            ctx.translate(W, 0); ctx.scale(-1, 1);
+            ctx.drawImage(video, layout.ox, layout.oy, layout.dw, layout.dh);
+            ctx.restore();
+
+            if (fg && active.hat) drawHat(fg, t);
+            if (fg && active.hearts) { spawnHearts(fg, dt); drawEyeHearts(fg, t); }
+            if (fg && active.glasses) drawGlasses(fg, t);
+            updateDrawHearts(dt);
+            if (partyOn) drawPartyText(now);
+            updateDrawConfetti(dt, now < party.until);
+
+            // Rekaman diambil SEBELUM skeleton / ring HUD, jadi videonya bersih
+            if (capState === 'recording') { recordFrame(); updateRecIndicator(now); }
+
+            if (showSkeleton) drawSkeletons();
+            if (g && gest.hold === g.type) drawHUDCircle(g.x, g.y, Math.min(1, gest.time / holdNeeded(g.type)), GESTURE_COLOR[g.type]);
+            updateMode(g, fg);
+        }
+
+        // ================== EVENTS / BOOT ==================
+        let resizeTimer = null;
+        window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 150); });
+        window.addEventListener('keydown', e => {
+            const k = e.key.toLowerCase();
+            if (k === 'escape') { if (capState === 'modal') closeModal(); return; }
+            if (capState === 'modal') return;
+            if (k === 'v') startCountdown();
+            else if (k === '1') fire('glasses');
+            else if (k === '2') fire('hearts');
+            else if (k === '3') fire('hat');
+            else if (k === 'b') fire('binus');
+            else if (e.key === 'ArrowRight') cycleStyle(1);
+            else if (e.key === 'ArrowLeft') cycleStyle(-1);
+            else if (k === 'h') showSkeleton = !showSkeleton;
+            else if (k === 'x') {
+                Object.keys(active).forEach(a => { active[a] = false; });
+                hearts.length = 0;
+                toast('ALL ACCESSORIES OFF');
+                updateStats();
+            }
+        });
+
+        resize();
+        updateStats();
+        requestAnimationFrame(frame);
+        startCamera().catch(err => { modeEl.textContent = 'CAMERA_ERROR: ' + err.message; });
+        initVision().catch(err => { console.error(err); modeEl.textContent = 'VISION_ERROR: ' + err.message; });
+    </script>
+</body>
+</html>
