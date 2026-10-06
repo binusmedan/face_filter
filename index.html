@@ -139,11 +139,19 @@
             HAT_SCALE: 1.08,        // ukuran topi relatif ke kepala (naikkan kalau rambut samping masih terlihat)
             HAT_YAW_SHIFT: 0.5,     // koreksi posisi topi saat kepala menoleh
             FACE_LERP: 0.55,
-            HAND_LERP: 0.6,
+            HAND_LERP: 0.55,
             FACE_TIMEOUT: 700,      // ms aksesoris tetap tampil saat wajah hilang sebentar
-            MAX_FACES: 8,           // jumlah wajah maksimum per deteksi full frame
-            MAX_TRACKS: 12,         // total wajah yang dilacak (dekat + jauh)
-            MAX_HANDS: 4,           // jumlah tangan (2 orang bisa membuat gesture bergantian)
+            HAND_TIMEOUT: 500,      // tangan bertahan saat model miss beberapa frame
+            MAX_FACES: 12,          // lebih cocok untuk foto/video grup
+            MAX_TRACKS: 18,
+            MAX_HANDS: 6,
+            HAND_DET_CONF: 0.35,
+            HAND_PRES_CONF: 0.35,
+            HAND_TRACK_CONF: 0.40,
+            VISION_INTERVAL_MS: 40, // inference ~25fps; render tetap mengikuti refresh display
+            FAR_HAND_DETECTION: true,
+            FAR_HAND_EVERY: 4,      // 1 crop tangan jauh tiap 4 tick vision agar tidak membebani rekaman
+            HAND_CROP_SIZE: 320,
             // ---- Deteksi wajah jauh / ramai (tiled multi-scale inference) ----
             CAMERA_W: 1920,         // resolusi kamera lebih tinggi = wajah jauh punya lebih banyak piksel
             CAMERA_H: 1080,
@@ -166,9 +174,9 @@
             CAPTURE_HOLD: 1200,     // ms tahan peace sign untuk mulai countdown
             COUNTDOWN: 3,           // detik hitung mundur sebelum rekam
             REC_SECONDS: 3,         // durasi video
-            REC_LONG_SIDE: 1280,    // resolusi video (sisi terpanjang, px)
+            REC_LONG_SIDE: 1080,    // kompromi kualitas + encoding lebih ringan
             REC_FPS: 30,
-            REC_BITRATE: 5000000,   // 5 Mbps -> sekitar 2 MB untuk 3 detik
+            REC_BITRATE: 4000000,   // bitrate cukup tajam tanpa membebani encoder
             MODAL_TIMEOUT: 60       // detik, modal QR otomatis tertutup
         };
 
@@ -842,53 +850,66 @@
         });
 
         // ================== HAND TRACKING ==================
-        let hands = [];                 // info tangan (koordinat layar, sudah di-smooth)
-        const smoothHands = {};
+        let hands = [];
+        let handTracks = [];
+        let nextHandId = 1;
         let showSkeleton = true;
 
         function handInfo(p) {
             const size = D(p[0], p[9]) || 1;
             const ext = (tip, pip) => D(p[0], p[tip]) > D(p[0], p[pip]) * 1.1;
             const curled = (tip, pip) => D(p[0], p[tip]) < D(p[0], p[pip]);
-            // Kelurusan telunjuk: jarak MCP->ujung dibagi panjang ruas (1 = lurus)
             const seg = D(p[5], p[6]) + D(p[6], p[7]) + D(p[7], p[8]);
             const others = ext(12, 10) + ext(16, 14) + ext(20, 18);
             const ids = [0, 5, 9, 13, 17];
             return {
                 p, size,
-                cx: ids.reduce((s, i) => s + p[i].x, 0) / ids.length,
-                cy: ids.reduce((s, i) => s + p[i].y, 0) / ids.length,
+                cx: ids.reduce((sum, i) => sum + p[i].x, 0) / ids.length,
+                cy: ids.reduce((sum, i) => sum + p[i].y, 0) / ids.length,
                 straight: seg ? D(p[5], p[8]) / seg : 0,
                 ok: D(p[4], p[8]) < size * CFG.OK_PINCH && others >= 2,
-                // Sign F: jempol + telunjuk bersentuhan, tengah/manis/kelingking lurus ke atas
                 fSign: D(p[4], p[8]) < size * CFG.OK_PINCH && others === 3 && p[12].y < p[0].y - size * 1.2,
                 okCenter: mid(p[4], p[8]),
                 fist: curled(8, 6) && curled(12, 10) && curled(16, 14) && curled(20, 18),
-                // Peace sign: telunjuk + tengah lurus, manis + kelingking menekuk, jempol tidak menjepit telunjuk
                 peace: ext(8, 6) && ext(12, 10) && curled(16, 14) && curled(20, 18) && D(p[4], p[8]) > size * 0.5,
                 open: ext(8, 6) && ext(12, 10) && ext(16, 14) && ext(20, 18)
             };
         }
 
-        function updateHands(hr) {
-            const handed = hr.handedness || hr.handednesses || [];
-            const seen = new Set();
-            const list = [];
-            (hr.landmarks || []).forEach((lm, i) => {
-                let key = (handed[i] && handed[i][0]) ? handed[i][0].categoryName : 'Hand';
-                if (seen.has(key)) key += '_' + i;
-                seen.add(key);
+        function updateHandLandmarks(lmsList) {
+            const now = performance.now();
+            const used = new Set();
+            lmsList.forEach(lm => {
                 const raw = lm.map(toScreen);
-                let s = smoothHands[key];
-                if (!s) s = smoothHands[key] = raw.map(q => ({ ...q }));
-                else raw.forEach((q, j) => {
-                    s[j].x += (q.x - s[j].x) * CFG.HAND_LERP;
-                    s[j].y += (q.y - s[j].y) * CFG.HAND_LERP;
+                const info = handInfo(raw);
+                const c = { x: info.cx, y: info.cy };
+                let best = null, bestD = Infinity;
+                handTracks.forEach(t => {
+                    if (used.has(t) || now - t.time > CFG.HAND_TIMEOUT) return;
+                    const ti = handInfo(t.p);
+                    const d = D(c, { x: ti.cx, y: ti.cy });
+                    if (d < bestD) { bestD = d; best = t; }
                 });
-                list.push(handInfo(s));
+                const gate = Math.max(info.size * 3.0, 70);
+                if (best && bestD < gate) {
+                    raw.forEach((q, j) => {
+                        best.p[j].x += (q.x - best.p[j].x) * CFG.HAND_LERP;
+                        best.p[j].y += (q.y - best.p[j].y) * CFG.HAND_LERP;
+                    });
+                    best.time = now;
+                    used.add(best);
+                } else {
+                    const t = { id: nextHandId++, p: raw.map(q => ({ ...q })), time: now };
+                    handTracks.push(t);
+                    used.add(t);
+                }
             });
-            Object.keys(smoothHands).forEach(k => { if (!seen.has(k)) delete smoothHands[k]; });
-            hands = list;
+            handTracks = handTracks.filter(t => now - t.time <= CFG.HAND_TIMEOUT);
+            hands = handTracks.map(t => ({ ...handInfo(t.p), id: t.id }));
+        }
+
+        function updateHands(hr) {
+            updateHandLandmarks((hr && hr.landmarks) || []);
         }
 
         // ================== FACE TRACKING ==================
@@ -1344,15 +1365,19 @@
 
         const easeOutBack = x => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
 
-        // Posisi tulisan: di atas kepala (di atas topi kalau topi aktif), diperhalus
-        // Ikuti wajah yang membuat sign F; kalau wajah itu hilang, pakai wajah terbesar
+        // BINUS MEDAN: kalau ramai selalu di atas orang yang paling tengah.
+        // Kalau sendiri, mengikuti posisi orang tersebut.
         function updatePartyAnchor(faces) {
             if (!faces.length) return;
-            let fg = faces.find(f => f.id === party.faceId);
-            if (!fg) {
-                fg = faces.reduce((a, b) => (b.head > a.head ? b : a));
-                party.faceId = fg.id;
+            let fg;
+            if (faces.length === 1) {
+                fg = faces[0];
+            } else {
+                fg = faces.reduce((best, f) =>
+                    Math.abs(f.cx - W / 2) < Math.abs(best.cx - W / 2) ? f : best
+                );
             }
+            party.faceId = fg.id;
             const tx = fg.hatX, ty = fg.hatY - fg.head * (active.hat ? 1.1 : 0.72);
             if (!party.seen) { party.x = tx; party.y = ty; party.seen = true; }
             party.x += (tx - party.x) * 0.25; party.y += (ty - party.y) * 0.25;
@@ -1656,8 +1681,8 @@
         closeBtn.addEventListener('click', closeModal);
 
         // ================== CAMERA + MEDIAPIPE TASKS ==================
-        let handLandmarker = null, faceLandmarker = null, farLandmarker = null, farCount = 0;
-        let lastVideoTime = -1, lastVisionTs = 0, visionTick = 0;
+        let handLandmarker = null, farHandLandmarker = null, faceLandmarker = null, farLandmarker = null, farCount = 0;
+        let lastVideoTime = -1, lastVisionTs = 0, visionTick = 0, lastVisionRun = 0;
 
         async function startCamera() {
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -1680,8 +1705,22 @@
                 }
             };
             handLandmarker = await create(HandLandmarker, HAND_MODEL, {
-                numHands: CFG.MAX_HANDS, minHandDetectionConfidence: 0.55, minHandPresenceConfidence: 0.55, minTrackingConfidence: 0.55
+                numHands: CFG.MAX_HANDS,
+                minHandDetectionConfidence: CFG.HAND_DET_CONF,
+                minHandPresenceConfidence: CFG.HAND_PRES_CONF,
+                minTrackingConfidence: CFG.HAND_TRACK_CONF
             });
+            if (CFG.FAR_HAND_DETECTION) {
+                try {
+                    farHandLandmarker = await create(HandLandmarker, HAND_MODEL, {
+                        runningMode: 'IMAGE', numHands: CFG.MAX_HANDS,
+                        minHandDetectionConfidence: 0.30,
+                        minHandPresenceConfidence: 0.30
+                    });
+                } catch (e) {
+                    console.warn('Far-hand detector unavailable', e);
+                }
+            }
             // Confidence lebih rendah supaya wajah yang agak jauh / kecil tetap terdeteksi
             faceLandmarker = await create(FaceLandmarker, FACE_MODEL, {
                 numFaces: CFG.MAX_FACES, minFaceDetectionConfidence: 0.35, minFacePresenceConfidence: 0.35, minTrackingConfidence: 0.35
@@ -1698,19 +1737,32 @@
             }
         }
 
-        // Tangan tiap frame video baru, wajah full frame tiap 2 frame, potongan zoom tiap frame
+        // AI inference dipisahkan dari render. Canvas tetap render tiap refresh layar,
+        // sementara MediaPipe dibatasi ~25fps supaya rekaman 30fps tidak tersendat.
         function runVision(now) {
             if (!handLandmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+            if (now - lastVisionRun < CFG.VISION_INTERVAL_MS) return;
+            lastVisionRun = now;
             lastVideoTime = video.currentTime;
+            const started = performance.now();
             const ts = Math.max(now, lastVisionTs + 1);
             lastVisionTs = ts;
+            visionTick++;
+
             updateHands(handLandmarker.detectForVideo(video, ts));
-            if (faceLandmarker && (++visionTick % 2 === 0)) {
+
+            // Full-face cukup tiap dua tick; track + smoothing menjaga aksesori tetap stabil.
+            if (faceLandmarker && visionTick % 2 === 0) {
                 const r = faceLandmarker.detectForVideo(video, ts);
                 updateFaces((r && r.faceLandmarks) || [], 'full');
             }
-            if (farLandmarker) runFarCrops();
-            adaptBudget(performance.now() - now);
+
+            // Saat merekam, inference crop mahal dibuat lebih jarang supaya encoder punya headroom.
+            const cropStride = capState === 'recording' ? 3 : 2;
+            if (farLandmarker && visionTick % cropStride === 0) runFarCrops();
+            if (farHandLandmarker && visionTick % CFG.FAR_HAND_EVERY === 0) runFarHandCrop();
+
+            adaptBudget(performance.now() - started);
         }
 
         // Jumlah crop per frame menyesuaikan beban: kalau deteksi > budget, kurangi; kalau ringan, tambah lagi
@@ -1752,6 +1804,29 @@
             for (let i = 0; i < Math.max(...perScale.map(l => l.length)); i++) perScale.forEach(l => { if (l[i]) tiles.push(l[i]); });
             tileCache = { key, tiles };
             return tiles;
+        }
+
+        // Satu tile tangan jauh per beberapa tick. Landmark crop dikembalikan ke koordinat full-video,
+        // lalu digabung ke hand tracker spasial agar tidak bentrok dengan deteksi full-frame.
+        const handCropCanvas = document.createElement('canvas');
+        const handCropCtx = handCropCanvas.getContext('2d', { willReadFrequently: false });
+        let handScanIdx = 0;
+        function runFarHandCrop() {
+            const tiles = scanTiles();
+            if (!tiles.length) return;
+            const crop = tiles[handScanIdx++ % tiles.length];
+            const C = CFG.HAND_CROP_SIZE;
+            handCropCanvas.width = C; handCropCanvas.height = C;
+            handCropCtx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, C, C);
+            let res;
+            try { res = farHandLandmarker.detect(handCropCanvas); } catch { return; }
+            const vw = video.videoWidth, vh = video.videoHeight;
+            const mapped = ((res && res.landmarks) || []).map(lm => lm.map(p => ({
+                x: (crop.sx + p.x * crop.sw) / vw,
+                y: (crop.sy + p.y * crop.sh) / vh,
+                z: p.z
+            })));
+            if (mapped.length) updateHandLandmarks(mapped);
         }
 
         // Koordinat layar -> koordinat piksel video asli (kebalikan toScreen)
@@ -1797,7 +1872,7 @@
             // Wajah yang tidak terlihat oleh deteksi full frame selama > 300 ms = wajah jauh
             const far = faceTracks.filter(t => now - t.time <= CFG.FACE_TIMEOUT && now - (t.fullTime || 0) > 300);
             farCount = far.length;
-            const n = cropBudget;
+            const n = capState === 'recording' ? 1 : cropBudget;
             const tiles = scanTiles();
             for (let i = 0; i < n; i++) {
                 // Selalu sisakan slot scan supaya wajah jauh yang baru tetap ditemukan
@@ -1844,8 +1919,8 @@
             // Rekaman diambil SEBELUM skeleton / ring HUD, jadi videonya bersih
             if (capState === 'recording') { recordFrame(); updateRecIndicator(now); }
 
-            if (showSkeleton) drawSkeletons();
-            if (g && gest.hold === g.type) drawHUDCircle(g.x, g.y, Math.min(1, gest.time / holdNeeded(g.type)), GESTURE_COLOR[g.type]);
+            if (capState !== 'recording' && showSkeleton) drawSkeletons();
+            if (capState !== 'recording' && g && gest.hold === g.type) drawHUDCircle(g.x, g.y, Math.min(1, gest.time / holdNeeded(g.type)), GESTURE_COLOR[g.type]);
             updateMode(g, faces);
         }
 
