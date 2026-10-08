@@ -1554,12 +1554,19 @@
         function recordFrame() {
             const rw = recCanvas.width, rh = recCanvas.height;
             recCtx.drawImage(canvas, 0, 0, rw, rh);
+            const m = Math.min(rw, rh) * 0.03;   // margin tepi
+
+            // Watermark logo "BINUS @Medan Mantap Kaleee" di pojok kanan bawah (ikut tersimpan di video)
+            const lw = Math.min(rw, rh) * 0.4, lh = lw * LOGO_H / LOGO_W;
+            recCtx.drawImage(logoCanvas, rw - m - lw, rh - m - lh, lw, lh);
+
+            // Caption tanggal tepat di atas logo
             recCtx.save();
             recCtx.font = `bold ${Math.round(rh * 0.026)}px "Courier New", monospace`;
             recCtx.textAlign = 'right'; recCtx.textBaseline = 'bottom';
             recCtx.shadowBlur = 8; recCtx.shadowColor = '#ff6ad5';
             recCtx.fillStyle = 'rgba(255,230,250,0.92)';
-            recCtx.fillText(recCaption, rw - rh * 0.03, rh - rh * 0.03);
+            recCtx.fillText(recCaption, rw - m, rh - m - lh);
             recCtx.restore();
         }
 
