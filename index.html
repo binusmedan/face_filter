@@ -1,0 +1,1824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accessory Filter v1.0 - Gesture Sync</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&display=swap">
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+        #input_video { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+        #stage { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        #toast {
+            position: absolute; top: 7vh; left: 50%; transform: translateX(-50%); z-index: 120;
+            color: #fff; font-weight: bold; font-size: 22px; letter-spacing: 2px; white-space: nowrap;
+            text-shadow: 0 0 14px #ff6ad5; background: rgba(0, 0, 0, 0.5); border: 1px solid #ff6ad5;
+            padding: 10px 18px; opacity: 0; transition: opacity 0.25s; pointer-events: none;
+        }
+        #toast.show { opacity: 1; }
+
+        .btn {
+            font-family: inherit; font-weight: bold; font-size: 12px; letter-spacing: 1px;
+            color: #ff6ad5; background: rgba(255, 106, 213, 0.08); border: 1px solid #ff6ad5;
+            padding: 8px 14px; cursor: pointer; text-shadow: inherit; text-decoration: none;
+        }
+        .btn:hover, .btn:focus-visible { background: rgba(255, 106, 213, 0.25); outline: none; }
+
+        /* Hitung mundur */
+        #countdown {
+            position: absolute; inset: 0; z-index: 140; display: none;
+            align-items: center; justify-content: center; pointer-events: none;
+            color: #fff; font-size: 180px; font-weight: bold; text-shadow: 0 0 30px #ff6ad5;
+        }
+
+        /* Kilat putih saat foto diambil (DOM, tidak ikut tersimpan di foto) */
+        #flash { position: absolute; inset: 0; z-index: 150; background: #fff; opacity: 0; pointer-events: none; }
+        #flash.on { animation: flash 0.45s ease-out; }
+        @keyframes flash { from { opacity: 0.9; } to { opacity: 0; } }
+
+        /* Modal hasil foto + QR */
+        #photo_modal {
+            position: absolute; inset: 0; z-index: 200; display: none;
+            align-items: center; justify-content: center;
+            background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        }
+        #photo_modal.open { display: flex; }
+        .modal-card {
+            display: flex; gap: 24px; align-items: center; flex-wrap: wrap; justify-content: center;
+            max-width: 92vw; padding: 24px; color: #ff6ad5; text-shadow: 0 0 10px #ff6ad5;
+            background: rgba(16, 0, 14, 0.9); border: 1px solid #ff6ad5; box-shadow: 0 0 40px rgba(255, 106, 213, 0.3);
+        }
+        #photo_preview { display: block; max-width: min(56vw, 720px); max-height: 70vh; border: 1px solid rgba(255, 106, 213, 0.5); background: #000; }
+        .qr-side { display: flex; flex-direction: column; align-items: center; gap: 12px; width: 260px; text-align: center; font-weight: bold; }
+        #qr_box {
+            width: 240px; height: 240px; background: #fff; display: flex; text-shadow: none;
+            align-items: center; justify-content: center; color: #20001c; font-size: 12px; padding: 8px; box-sizing: border-box;
+        }
+        #qr_box img { width: 100%; height: 100%; image-rendering: pixelated; }
+        #upload_status { font-size: 13px; min-height: 32px; }
+        #modal_timer { font-size: 10px; color: #ffb3ec; }
+        .modal-actions { display: flex; gap: 8px; }
+    </style>
+</head>
+<body>
+    <!--
+        Panel status dihapus; layar hanya berisi kamera + filter + layout logo.
+        Gesture:  PEACE = sunglasses | ROCK = spider web | HEART HANDS = wings
+                  D SIGN (telunjuk ke atas, jempol menyentuh jari tengah) = DIGIFEST CAMP | F SIGN = BINUS
+                  THUMBS UP (tahan) = foto | 2 KEPALAN = reset semua filter
+                  KEPAL KANAN + BUKA KIRI = style berikutnya | KEPAL KIRI + BUKA KANAN = style sebelumnya
+        Keyboard: [1][2][3] glasses/heart eyes/wings  [S] web  [D] DIGIFEST CAMP  [B] BINUS  [V] foto
+                  [Left][Right] style  [H] skeleton  [X] reset  [Esc] tutup modal
+    -->
+    <video id="input_video" autoplay playsinline muted></video>
+    <canvas id="stage"></canvas>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <div id="countdown" aria-live="assertive"></div>
+    <div id="flash"></div>
+
+    <div id="photo_modal" role="dialog" aria-modal="true" aria-labelledby="modal_title">
+        <div class="modal-card">
+            <img id="photo_preview" alt="Captured filter photo">
+            <div class="qr-side">
+                <div id="modal_title">FILTER_CAPTURE: COMPLETE</div>
+                <div id="qr_box">GENERATING...</div>
+                <div id="upload_status" aria-live="polite">UPLOADING...</div>
+                <div class="modal-actions">
+                    <a id="save_local" class="btn" download>SAVE LOCAL</a>
+                    <button id="close_modal" class="btn" type="button">CLOSE [ESC]</button>
+                </div>
+                <div id="modal_timer"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+
+    <script>
+        // ================== CONFIG ==================
+        const CFG = {
+            HOLD: 600,              // ms tahan gesture aksesoris untuk toggle ON/OFF
+            STYLE_HOLD: 500,        // ms tahan kepal + buka untuk ganti style
+            RELEASE_GRACE: 250,     // ms gesture boleh hilang sebentar (flicker) sebelum dianggap dilepas
+            OK_PINCH: 0.38,         // jarak jempol-telunjuk / ukuran tangan untuk tanda OK (kacamata)
+            TOUCH: 0.5,             // jarak sentuh antar tangan / ukuran tangan (hati / sayap)
+            GLASSES_EYE_DIST: 1.1,  // jarak lingkaran OK ke mata maks (x jarak antar mata)
+            HEART_RATE: 8,          // hati per detik per mata
+            MAX_HEARTS: 260,
+            HEAD_SCALE: 1.08,       // ukuran kepala relatif ke lebar wajah (dipakai sayap & posisi tulisan)
+            YAW_SHIFT: 0.5,         // koreksi titik atas kepala saat kepala menoleh
+            FACE_LERP: 0.55,
+            HAND_LERP: 0.6,
+            FACE_TIMEOUT: 700,      // ms aksesoris tetap tampil saat wajah hilang sebentar
+            MAX_FACES: 8,           // jumlah wajah maksimum per deteksi full frame
+            MAX_TRACKS: 12,         // total wajah yang dilacak (dekat + jauh)
+            MAX_HANDS: 4,           // jumlah tangan (2 orang bisa membuat gesture bergantian)
+            // ---- Deteksi wajah jauh / ramai (tiled multi-scale inference) ----
+            CAMERA_W: 1920,         // resolusi kamera lebih tinggi = wajah jauh punya lebih banyak piksel
+            CAMERA_H: 1080,
+            FAR_DETECTION: true,
+            SCAN_TILES: [0.5, 0.3], // ukuran tile scan (x lebar video). 0.3 = zoom ~3.3x untuk wajah sangat jauh
+            CROP_SIZE: 320,         // resolusi crop yang dikirim ke model
+            FAR_TRACK_ZOOM: 3.2,    // crop pelacak = lebar wajah x nilai ini
+            CROPS_PER_FRAME: 3,     // maks crop per frame (otomatis turun kalau FPS berat)
+            VISION_BUDGET_MS: 28,   // target waktu deteksi per frame; lebih dari ini -> crop dikurangi
+            FACE_CONFIRM_HITS: 2,   // wajah baru tampil setelah terdeteksi 2x (buang false positive)
+            FACE_NMS: 0.5,          // dua track lebih dekat dari ini (x lebar wajah) = wajah yang sama, digabung
+            // Sign F -> confetti + tulisan BINUS
+            F_EYE_CLEAR: 1.3,       // lingkaran jempol-telunjuk harus sejauh ini dari mata (x jarak mata), supaya beda dari gesture kacamata
+            PARTY_DURATION: 5000,   // ms tulisan tampil setelah sign F (diperpanjang selama sign F ditahan)
+            PARTY_FADE: 700,        // ms fade out
+            LOGO_HEAD_WIDTH: 3.4,   // lebar tulisan = lebar kepala x nilai ini (min 60%, maks 92% lebar layar)
+            CONFETTI_RAIN: 45,      // confetti per detik yang jatuh dari atas selama aktif
+            MAX_CONFETTI: 600,
+            // Gesture satu tangan baru: peace = kacamata hitam, rock = spider web, jempol = rekam
+            WEB_DURATION: 4000,     // ms spider web tampil (diperpanjang selama rock sign ditahan)
+            WEB_FADE: 700,
+            // Sayap (heart hands) -> di belakang badan, badan dipotong dengan segmentasi orang
+            WING_SCALE: 2.3,        // tinggi satu sayap (x lebar kepala)
+            WING_Y: 0.35,           // pangkal sayap di bawah dagu (x lebar kepala) = punggung atas
+            WING_GAP: 0.05,         // jarak pangkal sayap dari tengah badan (x lebar kepala)
+            WING_FLAP: 0.07,        // amplitudo kepakan (radian)
+            WING_FLAP_SPEED: 1.6,   // rad/detik -> satu kepakan sekitar 4 detik
+            WING_FOLLOW: 6,         // kecepatan sayap mengejar posisi badan (lebih kecil = lebih lambat & halus)
+            SEG_WIDTH: 256,         // resolusi input segmentasi (lebih kecil = lebih ringan, tepi badan lebih kasar)
+            // Sign D (satu tangan): telunjuk lurus ke atas, jari lain menekuk, ujung jempol menyentuh jari tengah -> DIGIFEST CAMP
+            D_THUMB_TOUCH: 0.55,    // jarak ujung jempol ke ujung/ruas jari tengah maks (x ukuran tangan)
+            D_INDEX_UP: 0.6,        // ujung telunjuk minimal sejauh ini di atas buku jari telunjuk (x ukuran tangan)
+            // Dua kepal tangan -> reset semua filter
+            RESET_HOLD: 800,        // ms tahan dua kepalan
+            // Foto
+            CAPTURE_HOLD: 1200,     // ms tahan jempol (thumbs up) untuk mulai countdown
+            COUNTDOWN: 3,           // detik hitung mundur sebelum foto diambil
+            PHOTO_LONG_SIDE: 1920,  // resolusi foto maks (sisi terpanjang, px)
+            PHOTO_QUALITY: 0.92,    // kualitas JPEG
+            // Layout (logo DIGIFEST CAMP kiri atas + GROWTOPIA kanan bawah), tampil di layar dan ikut tersimpan di foto
+            LAYOUT_SRC: 'assets/layout.png',
+            LAYOUT_SCALE: 1,        // perbesar / perkecil kedua logo layout
+            LAYOUT_WHITE: 225,      // PNG berlatar putih: piksel lebih terang dari ini yang tersambung ke tepi dibuat transparan
+            // Popup sign F: gambar logo "BINUS @Medan Mantap Kaleee". Kalau file tidak ada, dipakai logo gambar-kode lama.
+            BINUS_SRC: 'assets/BINUS @Medan Mantap Kaleee.png',
+            MODAL_TIMEOUT: 60       // detik, modal QR otomatis tertutup
+        };
+
+        const VISION_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1';
+        const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+        const FACE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+        const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite';
+        const CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[9,10],[10,11],[11,12],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+
+        // ================== DOM ==================
+        const video = document.getElementById('input_video');
+        const canvas = document.getElementById('stage');
+        const ctx = canvas.getContext('2d');
+        const toastEl = document.getElementById('toast');
+
+        let W = 0, H = 0, dpr = 1;
+        const layout = { ox: 0, oy: 0, dw: 0, dh: 0 };
+
+        const D = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+        const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+        function resize() {
+            dpr = Math.min(2, window.devicePixelRatio || 1);
+            W = window.innerWidth; H = window.innerHeight;
+            canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+            computeLayout();
+        }
+
+        function computeLayout() {
+            const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+            const s = Math.max(W / vw, H / vh);          // object-fit: cover
+            layout.dw = vw * s; layout.dh = vh * s;
+            layout.ox = (W - layout.dw) / 2; layout.oy = (H - layout.dh) / 2;
+        }
+
+        // Landmark ternormalisasi -> koordinat layar (cover + mirror)
+        function toScreen(lm) {
+            return { x: W - (lm.x * layout.dw + layout.ox), y: lm.y * layout.dh + layout.oy };
+        }
+
+        // ================== SHAPE HELPERS ==================
+        // Jalur hati, pusat (x, y), lebar s. Bisa dipakai di ctx maupun Path2D.
+        function heartPath(c, x, y, s) {
+            const P = (px, py) => [x + px * s, y + py * s];
+            if (typeof c.beginPath === 'function') c.beginPath();
+            c.moveTo(...P(0, 0.35));
+            c.bezierCurveTo(...P(-0.1, 0.25), ...P(-0.5, 0.05), ...P(-0.5, -0.2));
+            c.bezierCurveTo(...P(-0.5, -0.45), ...P(-0.2, -0.55), ...P(0, -0.3));
+            c.bezierCurveTo(...P(0.2, -0.55), ...P(0.5, -0.45), ...P(0.5, -0.2));
+            c.bezierCurveTo(...P(0.5, 0.05), ...P(0.1, 0.25), ...P(0, 0.35));
+            c.closePath();
+        }
+
+        function starPath(c, x, y, r, n = 5) {
+            c.beginPath();
+            for (let i = 0; i < n * 2; i++) {
+                const a = -Math.PI / 2 + i * Math.PI / n, rr = i % 2 ? r * 0.45 : r;
+                c.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+            }
+            c.closePath();
+        }
+
+        function circle(c, x, y, r, fill) { c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fillStyle = fill; c.fill(); }
+
+        // ================== GLASSES (unit = jarak antar mata, mata di x = -0.5 / +0.5) ==================
+        function temples(c, color, lw, x0) {
+            c.strokeStyle = color; c.lineWidth = lw; c.lineCap = 'round';
+            c.beginPath();
+            c.moveTo(-x0, -0.06); c.lineTo(-x0 - 0.22, -0.1);
+            c.moveTo(x0, -0.06); c.lineTo(x0 + 0.22, -0.1);
+            c.stroke();
+        }
+
+        function drawRoundGlasses(c) {
+            temples(c, '#141414', 0.06, 0.8);
+            [-1, 1].forEach(s => {
+                c.beginPath(); c.arc(0.5 * s, 0, 0.31, 0, Math.PI * 2);
+                c.fillStyle = 'rgba(25,25,35,0.22)'; c.fill();
+                c.lineWidth = 0.075; c.strokeStyle = '#141414'; c.stroke();
+                c.beginPath(); c.arc(0.5 * s, 0, 0.23, -2.5, -1.7);
+                c.lineWidth = 0.03; c.strokeStyle = 'rgba(255,255,255,0.45)'; c.stroke();
+            });
+            c.beginPath(); c.moveTo(-0.2, -0.05); c.quadraticCurveTo(0, -0.16, 0.2, -0.05);
+            c.lineWidth = 0.06; c.strokeStyle = '#141414'; c.stroke();
+        }
+
+        function aviatorLensPath(p, s) {
+            const X = x => 0.5 * s + x * s;
+            p.moveTo(X(-0.32), -0.17);
+            p.bezierCurveTo(X(-0.1), -0.24, X(0.25), -0.25, X(0.36), -0.15);
+            p.bezierCurveTo(X(0.42), 0.05, X(0.3), 0.32, X(0.05), 0.32);
+            p.bezierCurveTo(X(-0.2), 0.32, X(-0.34), 0.1, X(-0.32), -0.17);
+            p.closePath();
+        }
+
+        function drawAviator(c) {
+            temples(c, '#c9a227', 0.035, 0.86);
+            const p = new Path2D();
+            [-1, 1].forEach(s => aviatorLensPath(p, s));
+            const g = c.createLinearGradient(0, -0.25, 0, 0.33);
+            g.addColorStop(0, 'rgba(35,22,10,0.88)'); g.addColorStop(1, 'rgba(210,130,50,0.35)');
+            c.fillStyle = g; c.fill(p);
+            c.strokeStyle = '#d4af37'; c.lineWidth = 0.035; c.stroke(p);
+            c.beginPath();
+            c.moveTo(-0.18, -0.17); c.lineTo(0.18, -0.17);
+            c.moveTo(-0.17, -0.05); c.quadraticCurveTo(0, -0.11, 0.17, -0.05);
+            c.stroke();
+            c.strokeStyle = 'rgba(255,255,255,0.35)'; c.lineWidth = 0.025;
+            c.beginPath();
+            [-1, 1].forEach(s => { c.moveTo(0.5 * s - 0.15, -0.1); c.lineTo(0.5 * s - 0.02, -0.18); });
+            c.stroke();
+        }
+
+        function drawHeartGlasses(c) {
+            temples(c, '#ff2d8a', 0.05, 0.82);
+            [-1, 1].forEach(s => {
+                heartPath(c, 0.5 * s, 0.03, 0.66);
+                c.fillStyle = 'rgba(255,80,160,0.38)'; c.fill();
+                c.lineWidth = 0.05; c.strokeStyle = '#ff2d8a'; c.stroke();
+                c.beginPath(); c.ellipse(0.5 * s - 0.12, -0.1, 0.06, 0.035, -0.6, 0, Math.PI * 2);
+                c.fillStyle = 'rgba(255,255,255,0.6)'; c.fill();
+            });
+            c.beginPath(); c.moveTo(-0.17, -0.1); c.quadraticCurveTo(0, -0.18, 0.17, -0.1);
+            c.lineWidth = 0.045; c.strokeStyle = '#ff2d8a'; c.stroke();
+        }
+
+        function drawCyberVisor(c, t) {
+            const p = new Path2D();
+            p.moveTo(-1.02, -0.2); p.lineTo(1.02, -0.2); p.lineTo(0.92, 0.2); p.lineTo(0.12, 0.22);
+            p.lineTo(0, 0.12); p.lineTo(-0.12, 0.22); p.lineTo(-0.92, 0.2); p.closePath();
+            const g = c.createLinearGradient(-1, 0, 1, 0);
+            g.addColorStop(0, 'rgba(0,240,255,0.42)'); g.addColorStop(0.5, 'rgba(0,120,255,0.3)'); g.addColorStop(1, 'rgba(255,60,220,0.42)');
+            c.fillStyle = g; c.fill(p);
+            c.save();
+            c.shadowBlur = 14 * dpr; c.shadowColor = '#00f0ff';
+            c.strokeStyle = '#00f0ff'; c.lineWidth = 0.03; c.stroke(p);
+            c.restore();
+            // Scanline bergerak
+            c.save(); c.clip(p);
+            const y = -0.2 + ((t * 0.6) % 1) * 0.42;
+            c.fillStyle = 'rgba(255,255,255,0.5)'; c.fillRect(-1.1, y, 2.2, 0.02);
+            c.restore();
+            // Reticle di tiap mata
+            c.strokeStyle = 'rgba(255,255,255,0.85)'; c.lineWidth = 0.015;
+            [-1, 1].forEach(s => {
+                c.beginPath(); c.arc(0.5 * s, 0, 0.08, 0, Math.PI * 2); c.stroke();
+                c.beginPath(); c.moveTo(0.5 * s - 0.13, 0); c.lineTo(0.5 * s - 0.09, 0); c.moveTo(0.5 * s + 0.09, 0); c.lineTo(0.5 * s + 0.13, 0); c.stroke();
+            });
+        }
+
+        const PIXEL_MAP = [
+            'XXXXXXXXXXXXXXXXXXXX',
+            ' XWWXXXXX  XWWXXXXX ',
+            ' XXWWXXXX  XXWWXXXX ',
+            '  XXXXXX    XXXXXX  '
+        ];
+        function drawPixelThug(c) {
+            const cell = 0.1, x0 = -1.0, y0 = -0.17;
+            PIXEL_MAP.forEach((row, r) => {
+                for (let i = 0; i < row.length; i++) {
+                    const ch = row[i];
+                    if (ch === ' ') continue;
+                    c.fillStyle = ch === 'W' ? 'rgba(255,255,255,0.9)' : '#000';
+                    c.fillRect(x0 + i * cell, y0 + r * cell, cell + 0.003, cell + 0.003);
+                }
+            });
+        }
+
+        // Kacamata hitam (lensa gelap penuh), style default untuk peace sign
+        function drawSunglasses(c) {
+            temples(c, '#0a0a0a', 0.075, 0.84);
+            const p = new Path2D();
+            [-1, 1].forEach(s => {
+                const X = x => 0.5 * s + x * s;
+                p.moveTo(X(-0.37), -0.2);
+                p.lineTo(X(0.38), -0.23);
+                p.bezierCurveTo(X(0.43), 0.05, X(0.3), 0.31, X(0.05), 0.31);
+                p.bezierCurveTo(X(-0.22), 0.31, X(-0.39), 0.12, X(-0.37), -0.2);
+                p.closePath();
+            });
+            const g = c.createLinearGradient(0, -0.23, 0, 0.31);
+            g.addColorStop(0, '#050505'); g.addColorStop(1, '#22222c');
+            c.fillStyle = g; c.fill(p);
+            c.lineJoin = 'round'; c.strokeStyle = '#000'; c.lineWidth = 0.06; c.stroke(p);
+            // Jembatan hidung
+            c.beginPath(); c.moveTo(-0.13, -0.13); c.quadraticCurveTo(0, -0.22, 0.13, -0.13);
+            c.lineWidth = 0.07; c.lineCap = 'round'; c.stroke();
+            // Kilau
+            c.strokeStyle = 'rgba(255,255,255,0.28)'; c.lineWidth = 0.035;
+            c.beginPath();
+            [-1, 1].forEach(s => { c.moveTo(0.5 * s - 0.2 * s, -0.12); c.lineTo(0.5 * s - 0.06 * s, -0.17); });
+            c.stroke();
+        }
+
+        // ================== STYLES (5 per aksesoris) ==================
+        const GLASSES = [
+            { name: 'BLACK SUNGLASSES', draw: drawSunglasses },
+            { name: 'ROUND CLASSIC', draw: drawRoundGlasses },
+            { name: 'AVIATOR GOLD', draw: drawAviator },
+            { name: 'HEART PINK', draw: drawHeartGlasses },
+            { name: 'CYBER VISOR', draw: drawCyberVisor },
+            { name: 'PIXEL THUG', draw: drawPixelThug }
+        ];
+        const HEART_STYLES = [
+            { name: 'MERAH', color: '#ff1744', light: '#ff8a9b' },
+            { name: 'PINK', color: '#ff4fa3', light: '#ffc1e0' },
+            { name: 'UNGU', color: '#9b4dff', light: '#d6b8ff' },
+            { name: 'EMAS', color: '#ffb300', light: '#fff1a8' },
+            { name: 'RAINBOW', rainbow: true }
+        ];
+        // Sayap ala Growtopia (pixel art). kind: bat = rangka + selaput, razor = selaput bergerigi.
+        // Sprite di-render sekali (lihat buildWingSprite), lalu diperbesar tanpa smoothing supaya pikselnya tegas.
+        const WINGS = [
+            { name: 'DA VINCI WINGS', kind: 'bat', mem: '#f2e9dc', mem2: '#cfc2b0', bone: '#d9822b', boneHi: '#ffc27a', outline: [92, 46, 14] },
+            { name: 'GOLDEN RAZOR WINGS', kind: 'razor', mem: '#ffd21f', mem2: '#e09400', bone: '#c27800', boneHi: '#fff37a', tip: '#e9ff8a', outline: [110, 62, 0] },
+            { name: 'DEMON WINGS', kind: 'bat', mem: '#b3122a', mem2: '#4a0610', bone: '#2a0308', boneHi: '#ff5a5a', outline: [20, 0, 4] }
+        ];
+        const STYLES = { glasses: GLASSES, hearts: HEART_STYLES, wings: WINGS };
+        const LABEL = {
+            glasses: 'GLASSES', hearts: 'HEART EYES', wings: 'WINGS', binus: 'BINUS', capture: 'PHOTO',
+            spider: 'SPIDER WEB', digifest: 'DIGIFEST CAMP', reset: 'RESET ALL'
+        };
+        const GESTURE_COLOR = {
+            glasses: '#00f0ff', hearts: '#ff1744', wings: '#ffffff', next: '#ffffff', prev: '#ffffff',
+            binus: '#ffc107', capture: '#ff3b3b', spider: '#cfe8ff', digifest: '#00f0ff', reset: '#ff5252'
+        };
+
+        const active = { glasses: false, hearts: false, wings: false };
+        const styleIdx = { glasses: 0, hearts: 0, wings: 0 };
+        const styleName = k => STYLES[k][styleIdx[k]].name;
+
+        // Sprite hati (glow sudah di-render) supaya ratusan partikel tetap ringan
+        const SPRITE_FILL = 0.625;   // porsi lebar sprite yang berisi hati
+        function makeHeartSprite(color, light) {
+            const c = document.createElement('canvas');
+            c.width = c.height = 128;
+            const g = c.getContext('2d');
+            heartPath(g, 64, 68, 80);
+            g.shadowColor = color; g.shadowBlur = 16;
+            const grad = g.createRadialGradient(52, 52, 4, 64, 64, 50);
+            grad.addColorStop(0, light); grad.addColorStop(1, color);
+            g.fillStyle = grad; g.fill();
+            g.shadowBlur = 0;
+            g.fillStyle = 'rgba(255,255,255,0.55)';
+            g.beginPath(); g.ellipse(46, 50, 8, 5, -0.6, 0, Math.PI * 2); g.fill();
+            return c;
+        }
+        HEART_STYLES.forEach(s => {
+            s.sprites = s.rainbow
+                ? Array.from({ length: 12 }, (_, i) => makeHeartSprite(`hsl(${i * 30},100%,55%)`, `hsl(${i * 30},100%,85%)`))
+                : [makeHeartSprite(s.color, s.light)];
+        });
+
+        // ================== HAND TRACKING ==================
+        let hands = [];                 // info tangan (koordinat layar, sudah di-smooth)
+        const smoothHands = {};
+        let showSkeleton = true;
+
+        function handInfo(p) {
+            const size = D(p[0], p[9]) || 1;
+            const ext = (tip, pip) => D(p[0], p[tip]) > D(p[0], p[pip]) * 1.1;
+            const curled = (tip, pip) => D(p[0], p[tip]) < D(p[0], p[pip]);
+            const others = ext(12, 10) + ext(16, 14) + ext(20, 18);
+            const ids = [0, 5, 9, 13, 17];
+            const fourCurled = curled(8, 6) && curled(12, 10) && curled(16, 14) && curled(20, 18);
+            // Jempol ke atas: empat jari menekuk, ujung jempol jauh di atas pergelangan dan buku jari
+            const thumbUp = fourCurled && D(p[0], p[4]) > size * 1.3 && p[4].y < p[3].y && p[3].y < p[2].y &&
+                p[0].y - p[4].y > size * 1.1 && p[4].y < p[9].y - size * 0.5;
+            // Telunjuk + jari tengah lurus, manis + kelingking menekuk (bentuk V / pistol dua jari)
+            const two = ext(8, 6) && ext(12, 10) && curled(16, 14) && curled(20, 18);
+            // Sign D: telunjuk lurus ke atas, tengah/manis/kelingking menekuk, ujung jempol menyentuh jari tengah (lingkaran)
+            const dSign = ext(8, 6) && curled(12, 10) && curled(16, 14) && curled(20, 18) &&
+                p[8].y < p[5].y - size * CFG.D_INDEX_UP &&
+                Math.min(D(p[4], p[12]), D(p[4], p[11])) < size * CFG.D_THUMB_TOUCH;
+            return {
+                p, size,
+                thumbUp, dSign,
+                // Rock: telunjuk + kelingking lurus, tengah + manis menekuk (jempol bebas)
+                rock: ext(8, 6) && ext(20, 18) && curled(12, 10) && curled(16, 14),
+                cx: ids.reduce((s, i) => s + p[i].x, 0) / ids.length,
+                cy: ids.reduce((s, i) => s + p[i].y, 0) / ids.length,
+                ok: D(p[4], p[8]) < size * CFG.OK_PINCH && others >= 2,
+                // Sign F: jempol + telunjuk bersentuhan, tengah/manis/kelingking lurus ke atas
+                fSign: D(p[4], p[8]) < size * CFG.OK_PINCH && others === 3 && p[12].y < p[0].y - size * 1.2,
+                okCenter: mid(p[4], p[8]),
+                fist: fourCurled && !thumbUp,
+                // Peace sign: telunjuk + tengah lurus, manis + kelingking menekuk, jempol tidak menjepit telunjuk
+                peace: two && D(p[4], p[8]) > size * 0.5,
+                open: ext(8, 6) && ext(12, 10) && ext(16, 14) && ext(20, 18)
+            };
+        }
+
+        function updateHands(hr) {
+            const handed = hr.handedness || hr.handednesses || [];
+            const seen = new Set();
+            const list = [];
+            (hr.landmarks || []).forEach((lm, i) => {
+                let key = (handed[i] && handed[i][0]) ? handed[i][0].categoryName : 'Hand';
+                if (seen.has(key)) key += '_' + i;
+                seen.add(key);
+                const raw = lm.map(toScreen);
+                let s = smoothHands[key];
+                if (!s) s = smoothHands[key] = raw.map(q => ({ ...q }));
+                else raw.forEach((q, j) => {
+                    s[j].x += (q.x - s[j].x) * CFG.HAND_LERP;
+                    s[j].y += (q.y - s[j].y) * CFG.HAND_LERP;
+                });
+                list.push(handInfo(s));
+            });
+            Object.keys(smoothHands).forEach(k => { if (!seen.has(k)) delete smoothHands[k]; });
+            hands = list;
+        }
+
+        // ================== FACE TRACKING ==================
+        // Banyak wajah: tiap wajah punya "track" sendiri (dicocokkan ke wajah terdekat di frame sebelumnya)
+        let faceTracks = [];            // [{ id, pts, time, heartAcc }]
+        let nextFaceId = 1;
+
+        function rawFace(lm) {
+            const P = i => toScreen(lm[i]);
+            // Setelah mirror: mata kanan subjek (33/133) tampil di kanan layar
+            const raw = { eL: mid(P(362), P(263)), eR: mid(P(33), P(133)), top: P(10), sL: P(454), sR: P(234), nose: P(1), chin: P(152) };
+            if (raw.eL.x > raw.eR.x) {
+                [raw.eL, raw.eR] = [raw.eR, raw.eL];
+                [raw.sL, raw.sR] = [raw.sR, raw.sL];
+            }
+            return raw;
+        }
+
+        // lmsList = daftar landmark (ternormalisasi ke full video), src = 'full' | 'crop'
+        function updateFaces(lmsList, src) {
+            const now = performance.now();
+            const raws = lmsList.map(rawFace);
+            const used = new Set();
+            raws.forEach(raw => {
+                const c = mid(raw.eL, raw.eR), size = D(raw.sL, raw.sR) || 1;
+                let best = null, bd = Infinity;
+                faceTracks.forEach(t => {
+                    if (used.has(t) || now - t.time > CFG.FACE_TIMEOUT) return;
+                    const d = D(mid(t.pts.eL, t.pts.eR), c);
+                    if (d < bd) { bd = d; best = t; }
+                });
+                if (best && bd < size * 0.7) {
+                    Object.keys(raw).forEach(k => {
+                        best.pts[k].x += (raw[k].x - best.pts[k].x) * CFG.FACE_LERP;
+                        best.pts[k].y += (raw[k].y - best.pts[k].y) * CFG.FACE_LERP;
+                    });
+                    best.time = now;
+                    best.hits++;
+                    if (src === 'full') best.fullTime = now;
+                    used.add(best);
+                } else if (faceTracks.length < CFG.MAX_TRACKS) {
+                    const t = { id: nextFaceId++, pts: raw, time: now, hits: 1, fullTime: src === 'full' ? now : 0, heartAcc: 0 };
+                    faceTracks.push(t);
+                    used.add(t);
+                }
+            });
+            faceTracks = faceTracks.filter(t => now - t.time <= CFG.FACE_TIMEOUT);
+            mergeDuplicateTracks();
+        }
+
+        // NMS antar track: deteksi dari full frame + tile + crop bisa menghasilkan 2 track untuk 1 wajah
+        function mergeDuplicateTracks() {
+            const center = t => mid(t.pts.eL, t.pts.eR);
+            const width = t => D(t.pts.sL, t.pts.sR) || 1;
+            for (let i = 0; i < faceTracks.length; i++) {
+                for (let j = faceTracks.length - 1; j > i; j--) {
+                    const a = faceTracks[i], b = faceTracks[j];
+                    if (D(center(a), center(b)) > Math.max(width(a), width(b)) * CFG.FACE_NMS) continue;
+                    // Pertahankan track yang lebih "mapan" (lebih banyak hit), gabungkan waktu terakhir terlihat
+                    const [keep, drop] = a.hits >= b.hits ? [a, b] : [b, a];
+                    keep.hits += drop.hits;
+                    keep.time = Math.max(keep.time, drop.time);
+                    keep.fullTime = Math.max(keep.fullTime, drop.fullTime);
+                    faceTracks.splice(faceTracks.indexOf(drop), 1);
+                    if (drop === a) { i--; break; }
+                }
+            }
+        }
+
+        // Geometri semua wajah yang aktif DAN sudah terkonfirmasi (bukan false positive sesaat)
+        function faceGeoms() {
+            const now = performance.now();
+            return faceTracks
+                .filter(t => now - t.time <= CFG.FACE_TIMEOUT && (t.hits >= CFG.FACE_CONFIRM_HITS || t.fullTime))
+                .map(t => ({ ...faceGeom(t.pts), id: t.id, track: t }));
+        }
+
+        function faceGeom(f) {
+            const angle = Math.atan2(f.eR.y - f.eL.y, f.eR.x - f.eL.x);
+            const ux = Math.cos(angle), uy = Math.sin(angle);
+            const width = D(f.sL, f.sR);
+            // Lebar kepala: lebar wajah menyempit saat menoleh, tinggi wajah lebih stabil -> ambil yang terbesar
+            const head = Math.max(width, D(f.top, f.chin) * 0.82) * CFG.HEAD_SCALE;
+            // Menoleh: hidung bergeser dari tengah wajah; titik atas kepala digeser ke arah sebaliknya (sumbu tengkorak ada di belakang wajah)
+            const fc = mid(f.sL, f.sR);
+            const yaw = (f.nose.x - fc.x) * ux + (f.nose.y - fc.y) * uy;
+            return {
+                eL: f.eL, eR: f.eR, top: f.top, chin: f.chin,
+                cx: (f.eL.x + f.eR.x) / 2, cy: (f.eL.y + f.eR.y) / 2,
+                angle, eye: D(f.eL, f.eR), width, head,
+                topX: f.top.x - ux * yaw * CFG.YAW_SHIFT,
+                topY: f.top.y - uy * yaw * CFG.YAW_SHIFT
+            };
+        }
+
+        // ================== GESTURE DETECTION ==================
+        // faces = semua wajah aktif. Gesture dua tangan dicek untuk setiap pasangan tangan (bisa ada beberapa orang).
+        function detectGesture(faces) {
+            for (let i = 0; i < hands.length; i++) {
+                for (let j = i + 1; j < hands.length; j++) {
+                    const g2 = detectTwoHand(hands[i], hands[j], faces);
+                    if (g2) return g2;
+                }
+            }
+            return detectFSign(faces) || detectDSign(faces) || detectRock() || detectPeace() || detectThumbUp();
+        }
+
+        const nearEyes = (pt, f, k) => D(pt, f.eL) < f.eye * k || D(pt, f.eR) < f.eye * k;
+        const handPt = h => ({ x: h.cx, y: h.cy });
+
+        // Wajah terdekat dengan titik pt = pemilik tulisan (BINUS / DigiFest)
+        function nearestFaceId(pt, faces) {
+            let owner = faces[0], bd = Infinity;
+            faces.forEach(f => { const d = D(pt, { x: f.cx, y: f.cy }) / f.head; if (d < bd) { bd = d; owner = f; } });
+            return owner.id;
+        }
+
+        // Peace sign satu tangan -> kacamata hitam (toggle)
+        function detectPeace() {
+            const p = hands.find(h => h.peace);
+            return p ? { type: 'glasses', x: p.cx, y: p.cy } : null;
+        }
+
+        // Rock sign (telunjuk + kelingking) -> spider web
+        function detectRock() {
+            const r = hands.find(h => h.rock);
+            return r ? { type: 'spider', x: r.cx, y: r.cy } : null;
+        }
+
+        // Jempol ke atas -> rekam video (hanya saat tidak sedang merekam / modal tertutup)
+        function detectThumbUp() {
+            if (!canCapture()) return null;
+            const t = hands.find(h => h.thumbUp);
+            return t ? { type: 'capture', x: t.cx, y: t.cy } : null;
+        }
+
+        // Sign F satu tangan. Bentuknya sama dengan tanda OK untuk kacamata, jadi syaratnya:
+        // wajah terlihat, lingkaran jari jauh dari mata, dan tangan lain tidak sedang membuat tanda OK.
+        function detectFSign(faces) {
+            if (!faces.length) return null;
+            for (const h of hands) {
+                if (!h.fSign || faces.some(f => nearEyes(h.okCenter, f, CFG.F_EYE_CLEAR))) continue;
+                // Tangan lain di dekatnya juga membuat OK -> kemungkinan sedang membentuk kacamata
+                if (hands.some(o => o !== h && o.ok && D(handPt(o), handPt(h)) < h.size * 5)) continue;
+                return { type: 'binus', x: h.cx, y: h.cy, faceId: nearestFaceId(handPt(h), faces) };
+            }
+            return null;
+        }
+
+        // Sign D satu tangan -> tulisan DIGIFEST CAMP (wajah dipakai sebagai anchor tulisan)
+        function detectDSign(faces) {
+            if (!faces.length) return null;
+            const h = hands.find(q => q.dSign);
+            return h ? { type: 'digifest', x: h.cx, y: h.cy, faceId: nearestFaceId(handPt(h), faces) } : null;
+        }
+
+        function detectTwoHand(h1, h2, faces) {
+            const [A, B] = h1.cx < h2.cx ? [h1, h2] : [h2, h1];   // A = kiri layar, B = kanan layar
+            const s = (A.size + B.size) / 2;
+
+            // 0. Reset: dua kepalan tangan berdekatan (tangan orang yang sama)
+            if (A.fist && B.fist && Math.abs(A.cy - B.cy) < s * 3 && B.cx - A.cx < s * 7) {
+                return { type: 'reset', ...mid(handPt(A), handPt(B)) };
+            }
+
+            // 1. Kacamata: dua tanda OK di depan kedua mata salah satu wajah
+            if (A.ok && B.ok) {
+                const ca = A.okCenter, cb = B.okCenter;
+                let near = Math.abs(ca.y - cb.y) < s * 0.8 && D(ca, cb) > s * 0.6;
+                if (near && faces.length) near = faces.some(f =>
+                    D(ca, f.eL) < f.eye * CFG.GLASSES_EYE_DIST && D(cb, f.eR) < f.eye * CFG.GLASSES_EYE_DIST);
+                if (near) return { type: 'glasses', ...mid(ca, cb) };
+            }
+
+            // 2. Hati (sayap): ujung jari atas bersentuhan, ujung jempol bawah bersentuhan
+            let topD = Infinity, topPt = null;
+            [7, 8, 11, 12].forEach(a => [7, 8, 11, 12].forEach(b => {
+                const d = D(A.p[a], B.p[b]);
+                if (d < topD) { topD = d; topPt = mid(A.p[a], B.p[b]); }
+            }));
+            const thumbD = D(A.p[4], B.p[4]);
+            const thumbPt = mid(A.p[4], B.p[4]);
+            if (topD < s * CFG.TOUCH && thumbD < s * CFG.TOUCH &&
+                topPt.y < thumbPt.y - s * 0.25 && D(A.p[0], B.p[0]) > s * 0.9) {
+                return { type: 'wings', ...mid(topPt, thumbPt) };
+            }
+
+            // 3. Ganti style: satu tangan kepal, satu terbuka (harus berdekatan = tangan orang yang sama)
+            if (Math.abs(A.cy - B.cy) > s * 3 || B.cx - A.cx > s * 7) return null;
+            if (B.fist && A.open) return { type: 'next', x: B.cx, y: B.cy };
+            if (A.fist && B.open) return { type: 'prev', x: A.cx, y: A.cy };
+            return null;
+        }
+
+        // Tahan -> trigger sekali, lalu harus dilepas dulu sebelum trigger lagi
+        const gest = { hold: null, time: 0, latched: null, lost: 0 };
+        const holdNeeded = t => (t === 'next' || t === 'prev') ? CFG.STYLE_HOLD
+            : t === 'capture' ? CFG.CAPTURE_HOLD
+            : t === 'reset' ? CFG.RESET_HOLD
+            : CFG.HOLD;
+
+        function processGesture(g, dtMs) {
+            if (!g) {
+                gest.lost += dtMs;
+                if (gest.lost > CFG.RELEASE_GRACE) { gest.hold = null; gest.time = 0; gest.latched = null; }
+                return;
+            }
+            gest.lost = 0;
+            if (g.type === gest.latched) return;
+            if (g.type !== gest.hold) { gest.hold = g.type; gest.time = 0; }
+            gest.time += dtMs;
+            if (gest.time >= holdNeeded(g.type)) {
+                fire(g.type, g);
+                gest.latched = g.type; gest.hold = null; gest.time = 0;
+            }
+        }
+
+        function fire(type, g) {
+            if (type === 'next' || type === 'prev') { cycleStyle(type === 'next' ? 1 : -1); return; }
+            if (type === 'binus' || type === 'digifest') {
+                if (g && g.faceId) party.faceId = g.faceId;
+                party.logo = type === 'digifest' ? 'digifest' : 'binus';
+                party.confetti = type === 'binus';           // DigiFest Camp tanpa confetti, confetti hanya dari BINUS
+                startParty(performance.now());
+                return;
+            }
+            if (type === 'reset') { resetAll(); return; }
+            if (type === 'spider') { startWeb(performance.now(), g); return; }
+            if (type === 'capture') { if (canCapture()) startCountdown(); return; }
+            active[type] = !active[type];
+            if (!active[type] && type === 'hearts') hearts.length = 0;
+            if (active[type] && type === 'wings') ensureSegmenter();
+            toast(active[type] ? `${LABEL[type]} ON // ${styleName(type)}` : `${LABEL[type]} OFF`);
+        }
+
+        // Ganti style semua aksesoris yang aktif (kalau belum ada yang aktif, semua ikut berganti)
+        function cycleStyle(dir) {
+            let targets = Object.keys(active).filter(k => active[k]);
+            if (!targets.length) targets = Object.keys(active);
+            targets.forEach(k => { styleIdx[k] = (styleIdx[k] + dir + STYLES[k].length) % STYLES[k].length; });
+            toast(targets.map(k => `${LABEL[k]}: ${styleName(k)}`).join(' | '));
+        }
+
+        // Matikan semua filter: aksesoris, hati, tulisan BINUS / DIGIFEST CAMP, spider web, confetti
+        function resetAll() {
+            Object.keys(active).forEach(a => { active[a] = false; });
+            hearts.length = 0;
+            confetti.length = 0;
+            party.until = -Infinity;
+            web.until = -Infinity;
+            toast('ALL FILTERS RESET');
+        }
+
+        // ================== HEART PARTICLES ==================
+        const hearts = [];
+        // Akumulator per wajah supaya tiap orang mengeluarkan hati dengan laju yang sama
+        function spawnHearts(fg, dt) {
+            const tr = fg.track;
+            tr.heartAcc += dt * CFG.HEART_RATE;
+            while (tr.heartAcc >= 1) {
+                tr.heartAcc -= 1;
+                spawnHeart(fg.eL, -1, fg);
+                spawnHeart(fg.eR, 1, fg);
+            }
+        }
+
+        function spawnHeart(e, side, fg) {
+            if (hearts.length >= CFG.MAX_HEARTS) return;
+            const k = fg.eye / 100;
+            const sprites = HEART_STYLES[styleIdx.hearts].sprites;
+            hearts.push({
+                x: e.x, y: e.y,
+                vx: side * (30 + Math.random() * 100) * k,
+                vy: -(60 + Math.random() * 120) * k,
+                s0: fg.eye * (0.28 + Math.random() * 0.25),
+                life: 0, max: 1.6 + Math.random() * 0.9,
+                rot: (Math.random() - 0.5) * 0.6, vr: (Math.random() - 0.5) * 1.5,
+                seed: Math.random() * 10, k,
+                img: sprites[(Math.random() * sprites.length) | 0]
+            });
+        }
+
+        function updateDrawHearts(dt) {
+            for (let i = hearts.length - 1; i >= 0; i--) {
+                const p = hearts[i];
+                p.life += dt;
+                if (p.life >= p.max) { hearts.splice(i, 1); continue; }
+                p.vx *= Math.max(0, 1 - 1.2 * dt);
+                p.vy -= 25 * p.k * dt;                       // makin lama makin naik (melayang)
+                p.x += (p.vx + Math.sin(p.life * 5 + p.seed) * 25 * p.k) * dt;
+                p.y += p.vy * dt;
+                p.rot += p.vr * dt;
+                const sz = p.s0 * (0.35 + 0.65 * Math.min(1, p.life / 0.3)) / SPRITE_FILL;
+                const fade = p.life > p.max * 0.6 ? 1 - (p.life - p.max * 0.6) / (p.max * 0.4) : 1;
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, fade);
+                ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+                ctx.drawImage(p.img, -sz / 2, -sz / 2, sz, sz);
+                ctx.restore();
+            }
+        }
+
+        // Hati berdenyut di atas tiap mata
+        function drawEyeHearts(fg, t) {
+            const sprites = HEART_STYLES[styleIdx.hearts].sprites;
+            const img = sprites[Math.floor(t * 6) % sprites.length];
+            const sz = fg.eye * 0.5 * (1 + 0.1 * Math.sin(t * 8)) / SPRITE_FILL;
+            [fg.eL, fg.eR].forEach(e => {
+                ctx.save();
+                ctx.translate(e.x, e.y); ctx.rotate(fg.angle);
+                ctx.drawImage(img, -sz / 2, -sz / 2, sz, sz);
+                ctx.restore();
+            });
+        }
+
+        // ================== BINUS LOGO (pre-render ke offscreen canvas) ==================
+        const LOGO_W = 1400, LOGO_H = 660;
+        const logoCanvas = document.createElement('canvas');
+        logoCanvas.width = LOGO_W; logoCanvas.height = LOGO_H;
+        const FONT_TITLE = '"Lilita One", "Arial Black", Impact, sans-serif';
+
+        function layer() { const c = document.createElement('canvas'); c.width = LOGO_W; c.height = LOGO_H; return [c, c.getContext('2d')]; }
+
+        function splash(c, x, y, a, color, s = 1) {
+            c.save(); c.translate(x, y); c.rotate(a); c.scale(s, s);
+            c.fillStyle = color;
+            c.beginPath(); c.moveTo(0, -46); c.quadraticCurveTo(15, -6, 0, 12); c.quadraticCurveTo(-15, -6, 0, -46); c.fill();
+            c.beginPath(); c.arc(0, -64, 6, 0, Math.PI * 2); c.fill();
+            c.restore();
+        }
+
+        // Teks bertumpuk: bayangan, outline gelap, outline warna, outline dalam, isi
+        function layeredText(c, text, x, y, o) {
+            c.lineJoin = 'round'; c.miterLimit = 2;
+            c.save();
+            c.shadowColor = 'rgba(0,0,0,0.45)'; c.shadowBlur = 22; c.shadowOffsetY = 10;
+            c.lineWidth = o.outer; c.strokeStyle = o.outerColor; c.strokeText(text, x, y);
+            c.restore();
+            c.lineWidth = o.mid; c.strokeStyle = o.midColor; c.strokeText(text, x, y);
+            if (o.inner) { c.lineWidth = o.inner; c.strokeStyle = o.innerColor; c.strokeText(text, x, y); }
+            c.fillStyle = o.fill; c.fillText(text, x, y);
+        }
+
+        // Gambar popup BINUS (latar putih dibuang lewat keyOutWhite), dipasang contain di tengah slot logo
+        const binusArt = { img: null, w: 0, h: 0 };
+        (function loadBinusArt() {
+            const img = new Image();
+            img.onload = () => {
+                binusArt.img = keyOutWhite(img);
+                binusArt.w = img.naturalWidth; binusArt.h = img.naturalHeight;
+                renderLogo();
+            };
+            img.onerror = () => console.warn(`BINUS image not found: ${CFG.BINUS_SRC}, using drawn logo`);
+            img.src = encodeURI(CFG.BINUS_SRC);     // nama file berisi spasi
+
+        })();
+
+        function renderLogo() {
+            const c = logoCanvas.getContext('2d');
+            if (binusArt.img) {
+                c.setTransform(1, 0, 0, 1, 0, 0);
+                c.clearRect(0, 0, LOGO_W, LOGO_H);
+                const k = Math.min(LOGO_W / binusArt.w, LOGO_H / binusArt.h);
+                const dw = binusArt.w * k, dh = binusArt.h * k;
+                c.imageSmoothingEnabled = true;
+                c.drawImage(binusArt.img, (LOGO_W - dw) / 2, (LOGO_H - dh) / 2, dw, dh);
+                return;
+            }
+            c.clearRect(0, 0, LOGO_W, LOGO_H);
+            const cx = LOGO_W / 2;
+
+            // Cipratan di atas tulisan
+            splash(c, 300, 160, -0.75, '#c62828', 1.1); splash(c, 360, 120, -0.3, '#d4a017', 0.8);
+            splash(c, 1040, 105, 0.35, '#d4a017', 0.9); splash(c, 1110, 140, 0.8, '#c62828', 1.15);
+
+            // ---- BINUS (putih-perak, outline emas, miring) ----
+            const by = 380;
+            const [L, b] = layer();
+            b.font = `250px ${FONT_TITLE}`; b.textAlign = 'center'; b.textBaseline = 'alphabetic';
+            b.setTransform(1, 0, -0.2, 1, 0.2 * (by - 100), 0);
+            const gold = b.createLinearGradient(0, by - 220, 0, by + 20);
+            gold.addColorStop(0, '#fff1b0'); gold.addColorStop(0.35, '#e0a526'); gold.addColorStop(0.65, '#9c6510'); gold.addColorStop(1, '#f3c552');
+            layeredText(b, 'BINUS', cx, by, { outer: 46, outerColor: '#4a2a08', mid: 30, midColor: gold, inner: 10, innerColor: '#fffaf0', fill: '#ffffff' });
+            // Isi perak + goresan kuas (hanya di area isi)
+            const [F, f] = layer();
+            f.font = b.font; f.textAlign = 'center'; f.setTransform(1, 0, -0.2, 1, 0.2 * (by - 100), 0);
+            const silver = f.createLinearGradient(0, by - 200, 0, by);
+            silver.addColorStop(0, '#ffffff'); silver.addColorStop(0.55, '#f1edf6'); silver.addColorStop(1, '#c8c1d8');
+            f.fillStyle = silver; f.fillText('BINUS', cx, by);
+            f.setTransform(1, 0, 0, 1, 0, 0);
+            f.globalCompositeOperation = 'source-atop';
+            for (let i = 0; i < 26; i++) {
+                const y = by - 200 + i * 8 + Math.sin(i * 1.7) * 3;
+                f.strokeStyle = i % 3 ? 'rgba(150,140,175,0.16)' : 'rgba(255,255,255,0.55)';
+                f.lineWidth = 2 + (i % 4);
+                f.beginPath(); f.moveTo(cx - 520, y); f.quadraticCurveTo(cx, y - 14, cx + 520, y + 6); f.stroke();
+            }
+            const shine = f.createLinearGradient(0, by - 200, 0, by - 110);
+            shine.addColorStop(0, 'rgba(255,255,255,0.7)'); shine.addColorStop(1, 'rgba(255,255,255,0)');
+            f.fillStyle = shine; f.fillRect(0, by - 220, LOGO_W, 110);
+            b.setTransform(1, 0, 0, 1, 0, 0);
+            b.drawImage(F, 0, 0);
+            c.drawImage(L, 0, 0);
+
+            // ---- Sapuan kuas merah di bawah baris kedua ----
+            const sw = c.createLinearGradient(cx - 480, 0, cx + 460, 0);
+            sw.addColorStop(0, '#7f0000'); sw.addColorStop(0.4, '#e53935'); sw.addColorStop(1, '#8e0000');
+            c.save();
+            c.shadowColor = 'rgba(0,0,0,0.35)'; c.shadowBlur = 16; c.shadowOffsetY = 8;
+            c.fillStyle = sw;
+            const swoosh = new Path2D();
+            swoosh.moveTo(cx - 540, 590);
+            swoosh.quadraticCurveTo(cx - 100, 466, cx + 500, 476);
+            swoosh.quadraticCurveTo(cx + 430, 520, cx + 340, 542);
+            swoosh.quadraticCurveTo(cx - 80, 604, cx - 540, 590);
+            swoosh.closePath();
+            c.fillStyle = sw; c.fill(swoosh);
+            c.restore();
+            // Serat kuas
+            c.save(); c.clip(swoosh);
+            for (let i = 0; i < 14; i++) {
+                c.strokeStyle = i % 2 ? 'rgba(255,255,255,0.14)' : 'rgba(60,0,0,0.25)';
+                c.lineWidth = 2 + (i % 3);
+                c.beginPath(); c.moveTo(cx - 540, 560 + i * 4); c.quadraticCurveTo(cx - 60, 470 + i * 8, cx + 520, 470 + i * 6); c.stroke();
+            }
+            c.restore();
+            c.strokeStyle = '#ffca28'; c.lineWidth = 8; c.lineCap = 'round';
+            c.beginPath(); c.moveTo(cx - 330, 580); c.quadraticCurveTo(cx, 538, cx + 410, 516); c.stroke();
+
+            // ---- @Medan (putih) + Mantap Kaleee (kuning-emas), outline merah ----
+            const ly = 520;
+            c.save();
+            c.font = `112px ${FONT_TITLE}`; c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+            const t1 = '@Medan', t2 = 'Mantap Kaleee', gap = 26;
+            const w1 = c.measureText(t1).width, w2 = c.measureText(t2).width;
+            const scale = Math.min(1, 1180 / (w1 + gap + w2));
+            const x0 = cx - (w1 + gap + w2) * scale / 2;
+            c.setTransform(scale, 0, -0.12 * scale, scale, x0 + 0.12 * scale * (ly - 40), ly - ly * scale);
+            const yellow = c.createLinearGradient(0, ly - 95, 0, ly + 10);
+            yellow.addColorStop(0, '#fffde7'); yellow.addColorStop(0.35, '#ffe14d'); yellow.addColorStop(1, '#ff9800');
+            const opt = { outer: 34, outerColor: '#4d0606', mid: 20, midColor: '#e53935' };
+            layeredText(c, t1, 0, ly, { ...opt, fill: '#ffffff' });
+            layeredText(c, t2, w1 + gap, ly, { ...opt, fill: yellow });
+            c.restore();
+        }
+
+        // ---- Logo DIGIFEST CAMP: papan huruf gelap 3D + tabung neon per huruf (ukuran sama dengan logo BINUS) ----
+        const digiCanvas = document.createElement('canvas');
+        digiCanvas.width = LOGO_W; digiCanvas.height = LOGO_H;
+
+        // Warna neon per huruf: DIGI cyan -> biru -> ungu, FEST magenta -> pink -> merah, CAMP hijau
+        const DIGI_LINE1 = [['D', '#19f0ff'], ['I', '#1fc8ff'], ['G', '#3d8bff'], ['I', '#7a5cff'],
+                            ['F', '#d43dff'], ['E', '#ff3ddc'], ['S', '#ff3fa8'], ['T', '#ff3f6e']];
+        const DIGI_LINE2 = [['C', '#3dff7a'], ['A', '#3dff8f'], ['M', '#3dffa8'], ['P', '#3dffbf']];
+
+        function neonLine(c, letters, cx, by, size, maxW) {
+            const ls = () => size * 0.06;                 // jarak antar huruf (ruang untuk bingkai gelap)
+            const measure = () => {
+                c.font = `${size}px ${FONT_TITLE}`;
+                const ws = letters.map(([ch]) => c.measureText(ch).width);
+                return { ws, total: ws.reduce((a, b) => a + b, 0) + ls() * (letters.length - 1) };
+            };
+            let m = measure();
+            if (m.total > maxW) { size *= maxW / m.total; m = measure(); }
+            c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+            c.lineJoin = 'round'; c.lineCap = 'round';
+            const frame = size * 0.2, depth = size * 0.07;
+            const xs = [];
+            let x = cx - m.total / 2;
+            m.ws.forEach(w => { xs.push(x); x += w + ls(); });
+
+            // Sisi 3D (extrusion) ke bawah
+            c.save();
+            c.shadowColor = 'rgba(0,0,0,0.5)'; c.shadowBlur = 24; c.shadowOffsetY = 12;
+            c.strokeStyle = c.fillStyle = '#070912'; c.lineWidth = frame;
+            letters.forEach(([ch], i) => { c.strokeText(ch, xs[i] + depth * 0.25, by + depth); c.fillText(ch, xs[i] + depth * 0.25, by + depth); });
+            c.restore();
+            for (let k = depth - 1; k > 0; k -= 2) {
+                c.strokeStyle = c.fillStyle = k > depth * 0.5 ? '#0d1222' : '#141b30';
+                letters.forEach(([ch], i) => { c.strokeText(ch, xs[i] + k * 0.25, by + k); c.fillText(ch, xs[i] + k * 0.25, by + k); });
+            }
+            // Muka papan (gelap) + tepi terang tipis
+            const face = c.createLinearGradient(0, by - size * 0.8, 0, by + frame);
+            face.addColorStop(0, '#2a3350'); face.addColorStop(1, '#151a2c');
+            letters.forEach(([ch], i) => {
+                c.lineWidth = frame + 4; c.strokeStyle = '#3a4566'; c.strokeText(ch, xs[i], by);
+                c.lineWidth = frame; c.strokeStyle = face; c.strokeText(ch, xs[i], by);
+                c.fillStyle = face; c.fillText(ch, xs[i], by);
+            });
+            // Tabung neon mengikuti kontur huruf: glow lebar, tabung berwarna, inti putih
+            letters.forEach(([ch, col], i) => {
+                c.save();
+                c.shadowColor = col; c.shadowBlur = size * 0.16;
+                c.strokeStyle = col; c.lineWidth = size * 0.05;
+                c.strokeText(ch, xs[i], by); c.strokeText(ch, xs[i], by);
+                c.shadowBlur = size * 0.05;
+                c.lineWidth = size * 0.022; c.strokeStyle = 'rgba(255,255,255,0.85)';
+                c.strokeText(ch, xs[i], by);
+                c.restore();
+            });
+        }
+
+        function renderDigiFest() {
+            const c = digiCanvas.getContext('2d');
+            c.setTransform(1, 0, 0, 1, 0, 0);
+            c.clearRect(0, 0, LOGO_W, LOGO_H);
+            const cx = LOGO_W / 2;
+            neonLine(c, DIGI_LINE1, cx, 290, 250, LOGO_W - 120);
+            neonLine(c, DIGI_LINE2, cx, 590, 230, LOGO_W - 120);
+        }
+
+        function renderAllLogos() { renderLogo(); renderDigiFest(); }
+
+        renderAllLogos();
+        // Render ulang setelah web font siap (Lilita One + Kaushan Script)
+        window.addEventListener('load', () => {
+            if (!document.fonts) return;
+            document.fonts.load(`250px ${FONT_TITLE}`).then(renderAllLogos).catch(() => {});
+        });
+
+        // ================== CONFETTI + CELEBRATION ==================
+        const CONFETTI_COLORS = ['#e53935', '#ffc107', '#ffffff', '#1e88e5', '#43a047', '#ff4fa3', '#ff9800'];
+        const confetti = [];
+        const party = { start: -1, until: -1, x: 0, y: 0, seen: false, logo: 'binus', confetti: true };
+        let rainAcc = 0;
+
+        function addConfetti(x, y, vx, vy) {
+            if (confetti.length >= CFG.MAX_CONFETTI) return;
+            const k = H / 720;
+            const shape = Math.random() < 0.6 ? 0 : (Math.random() < 0.5 ? 1 : 2);   // 0 kotak, 1 bulat, 2 pita panjang
+            confetti.push({
+                x, y, vx, vy, k, shape,
+                w: (shape === 2 ? 5 : 9 + Math.random() * 6) * k,
+                h: (shape === 2 ? 22 + Math.random() * 14 : 6 + Math.random() * 6) * k,
+                color: CONFETTI_COLORS[(Math.random() * CONFETTI_COLORS.length) | 0],
+                rot: Math.random() * Math.PI * 2, vr: (Math.random() - 0.5) * 10,
+                phase: Math.random() * Math.PI * 2, vp: 6 + Math.random() * 8, life: 0
+            });
+        }
+
+        function burstConfetti(ox, oy) {
+            const k = H / 720;
+            for (let i = 0; i < 150; i++) {
+                const a = -Math.PI * (0.05 + Math.random() * 0.9), sp = (350 + Math.random() * 650) * k;
+                addConfetti(ox, oy, Math.cos(a) * sp, Math.sin(a) * sp);
+            }
+            // Meriam confetti dari kedua sudut bawah
+            [[0, 1], [W, -1]].forEach(([x, s]) => {
+                for (let i = 0; i < 90; i++) {
+                    const a = -Math.PI / 2 + s * (0.35 + Math.random() * 0.35), sp = (900 + Math.random() * 600) * k;
+                    addConfetti(x, H, Math.cos(a) * sp, Math.sin(a) * sp);
+                }
+            });
+        }
+
+        function startParty(now) {
+            const wasActive = now < party.until + CFG.PARTY_FADE;
+            if (!wasActive) party.start = now;            // animasi pop hanya saat baru muncul
+            party.until = now + CFG.PARTY_DURATION;
+            if (party.confetti) burstConfetti(party.seen ? party.x : W / 2, party.seen ? party.y : H * 0.3);
+        }
+
+        // ================== SPIDER WEB (rock sign) ==================
+        const web = { start: -1, until: -1, x: 0, y: 0 };
+
+        function startWeb(now, g) {
+            if (now >= web.until + CFG.WEB_FADE) web.start = now;      // animasi menembak hanya saat baru muncul
+            web.until = now + CFG.WEB_DURATION;
+            web.x = g ? g.x : W / 2; web.y = g ? g.y : H / 2;
+        }
+
+        // Jaring laba-laba menyebar dari telapak tangan: jari-jari radial + cincin yang melengkung ke dalam
+        function drawWeb(now) {
+            let alpha = 1;
+            if (now > web.until) alpha = 1 - (now - web.until) / CFG.WEB_FADE;
+            if (alpha <= 0) return;
+            const grow = Math.min(1, (now - web.start) / 500);
+            const R = Math.max(W, H) * 0.6 * (1 - Math.pow(1 - grow, 3));
+            if (R < 2) return;
+            const k = H / 720, SPOKES = 14, RINGS = 10;
+            const ang = i => (i / SPOKES) * Math.PI * 2 + 0.2;
+            ctx.save();
+            ctx.translate(web.x, web.y);
+            ctx.globalAlpha = alpha;
+            ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+            ctx.shadowColor = 'rgba(190,225,255,0.9)'; ctx.shadowBlur = 6 * dpr;
+            ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 2 * k;
+            ctx.beginPath();
+            for (let i = 0; i < SPOKES; i++) { ctx.moveTo(0, 0); ctx.lineTo(Math.cos(ang(i)) * R, Math.sin(ang(i)) * R); }
+            ctx.stroke();
+            ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 1.3 * k;
+            for (let j = 1; j <= RINGS; j++) {
+                const r = R * Math.pow(j / RINGS, 1.35);
+                ctx.beginPath();
+                ctx.moveTo(Math.cos(ang(0)) * r, Math.sin(ang(0)) * r);
+                for (let i = 0; i < SPOKES; i++) {
+                    const a1 = ang(i + 1), am = (ang(i) + a1) / 2;
+                    ctx.quadraticCurveTo(Math.cos(am) * r * 0.9, Math.sin(am) * r * 0.9, Math.cos(a1) * r, Math.sin(a1) * r);
+                }
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+
+        function updateDrawConfetti(dt, raining) {
+            if (raining) {
+                rainAcc += dt * CFG.CONFETTI_RAIN;
+                while (rainAcc >= 1) { rainAcc -= 1; addConfetti(Math.random() * W, -20, (Math.random() - 0.5) * 60, 60 + Math.random() * 80); }
+            }
+            for (let i = confetti.length - 1; i >= 0; i--) {
+                const p = confetti[i];
+                p.life += dt;
+                p.vy += 900 * p.k * dt;
+                const drag = Math.max(0, 1 - 1.6 * dt);
+                p.vx *= drag; p.vy *= drag;
+                p.vy = Math.min(p.vy, 240 * p.k);              // kecepatan jatuh maksimum (melayang)
+                p.phase += p.vp * dt;
+                p.x += (p.vx + Math.sin(p.phase * 0.5) * 40 * p.k) * dt;
+                p.y += p.vy * dt;
+                p.rot += p.vr * dt;
+                if (p.y > H + 40 || p.life > 9) { confetti.splice(i, 1); continue; }
+                ctx.save();
+                ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+                ctx.scale(1, Math.cos(p.phase));              // efek kertas berputar 3D
+                ctx.fillStyle = p.color;
+                if (p.shape === 1) { ctx.beginPath(); ctx.arc(0, 0, p.w * 0.45, 0, Math.PI * 2); ctx.fill(); }
+                else ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+                ctx.restore();
+            }
+        }
+
+        const easeOutBack = x => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+
+        // Posisi tulisan: di atas kepala, diperhalus
+        // Ikuti wajah yang membuat sign F; kalau wajah itu hilang, pakai wajah terbesar
+        function updatePartyAnchor(faces) {
+            if (!faces.length) return;
+            let fg = faces.find(f => f.id === party.faceId);
+            if (!fg) {
+                fg = faces.reduce((a, b) => (b.head > a.head ? b : a));
+                party.faceId = fg.id;
+            }
+            const tx = fg.topX, ty = fg.topY - fg.head * 0.72;
+            if (!party.seen) { party.x = tx; party.y = ty; party.seen = true; }
+            party.x += (tx - party.x) * 0.25; party.y += (ty - party.y) * 0.25;
+            party.headW = fg.head;
+        }
+
+        function drawPartyText(now) {
+            const t = (now - party.start) / 1000;
+            let alpha = 1;
+            if (now > party.until) alpha = 1 - (now - party.until) / CFG.PARTY_FADE;
+            if (alpha <= 0) return;
+            // Besar: ikut ukuran kepala, minimal 60% dan maksimal 92% lebar layar
+            const w = Math.min(W * 0.92, Math.max(W * 0.6, (party.headW || W * 0.3) * CFG.LOGO_HEAD_WIDTH));
+            const h = w * LOGO_H / LOGO_W;
+            const s = easeOutBack(Math.min(1, t / 0.55));
+            const bob = Math.sin(t * 3) * h * 0.02;
+            // Tepi bawah tulisan di anchor; jaga supaya tidak keluar layar
+            let cx = Math.min(W - w / 2 - 8, Math.max(w / 2 + 8, party.x));
+            let cy = Math.max(h / 2 + 8, party.y - h / 2) + bob;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.translate(cx, cy); ctx.rotate(Math.sin(t * 2) * 0.025 - 0.02); ctx.scale(s, s);
+            ctx.drawImage(party.logo === 'digifest' ? digiCanvas : logoCanvas, -w / 2, -h / 2, w, h);
+            // Kilau bintang di sekitar tulisan
+            for (let i = 0; i < 6; i++) {
+                const a = 0.5 + 0.5 * Math.sin(t * 5 + i * 1.9);
+                ctx.fillStyle = `rgba(255,255,255,${0.9 * a})`;
+                starPath(ctx, (Math.sin(i * 2.3) * 0.48) * w, (Math.cos(i * 1.7) * 0.42) * h, (6 + 8 * a) * (w / 700), 4);
+                ctx.fill();
+            }
+            ctx.restore();
+        }
+
+        // ================== RENDER ==================
+        function drawGlasses(fg, t) {
+            ctx.save();
+            ctx.translate(fg.cx, fg.cy); ctx.rotate(fg.angle); ctx.scale(fg.eye, fg.eye);
+            GLASSES[styleIdx.glasses].draw(ctx, t);
+            ctx.restore();
+        }
+
+        // ================== WINGS (pixel art ala Growtopia, di belakang badan) ==================
+        // Sprite = sayap KANAN (mengarah ke +x). Koordinat gambar dalam satuan 0..1, pangkal sayap di WING_ROOT.
+        const WING_SPR_W = 64, WING_SPR_H = 56, WING_PAD = 2;
+        const WING_ROOT = { x: 0.04, y: 0.66 };
+
+        function batWing(g, st) {
+            const lw = 1 / WING_SPR_H, razor = st.kind === 'razor';
+            const R = WING_ROOT, E = { x: 0.34, y: 0.26 }, Wr = { x: 0.66, y: 0.10 }, T = { x: 0.80, y: -0.02 };
+            // Ujung jari (selaput terbentang di antaranya). Razor: lebih banyak gerigi.
+            const F = razor
+                ? [{ x: 1.0, y: 0.42 }, { x: 0.93, y: 0.62 }, { x: 0.80, y: 0.78 }, { x: 0.62, y: 0.88 }, { x: 0.42, y: 0.92 }, { x: 0.20, y: 0.86 }]
+                : [{ x: 0.99, y: 0.50 }, { x: 0.80, y: 0.82 }, { x: 0.50, y: 0.93 }, { x: 0.16, y: 0.88 }];
+            g.beginPath();
+            g.moveTo(R.x, R.y); g.lineTo(E.x, E.y); g.lineTo(Wr.x, Wr.y); g.lineTo(F[0].x, F[0].y);
+            for (let i = 1; i < F.length; i++) {
+                const a = F[i - 1], b = F[i], m = mid(a, b);
+                // Tepi selaput ditarik ke arah pergelangan: lengkung (bat) atau takik tajam (razor)
+                const k = razor ? 0.22 : 0.3;
+                const c = { x: m.x + (Wr.x - m.x) * k, y: m.y + (Wr.y - m.y) * k };
+                if (razor) { g.lineTo(c.x, c.y); g.lineTo(b.x, b.y); }
+                else g.quadraticCurveTo(c.x, c.y, b.x, b.y);
+            }
+            g.lineTo(R.x, R.y + 0.08); g.closePath();
+            const grad = g.createLinearGradient(0, 0.1, 0, 0.95);
+            grad.addColorStop(0, st.mem); grad.addColorStop(1, st.mem2);
+            g.fillStyle = grad; g.fill();
+            g.lineCap = 'round'; g.lineJoin = 'round';
+            // Jari-jari rangka (tanpa jari terakhir yang menempel ke badan)
+            g.strokeStyle = st.bone; g.lineWidth = 2.4 * lw;
+            g.beginPath();
+            F.slice(0, -1).forEach((f, i) => { if (razor && i % 2) return; g.moveTo(Wr.x, Wr.y); g.lineTo(f.x, f.y); });
+            g.stroke();
+            // Lengan atas (lebih tebal) + kilau
+            g.lineWidth = 4 * lw;
+            g.beginPath(); g.moveTo(R.x, R.y); g.lineTo(E.x, E.y); g.lineTo(Wr.x, Wr.y); g.stroke();
+            g.strokeStyle = st.boneHi; g.lineWidth = 1.3 * lw;
+            g.beginPath(); g.moveTo(R.x + 0.03, R.y - 0.06); g.lineTo(E.x, E.y - 0.02); g.lineTo(Wr.x, Wr.y - 0.02); g.stroke();
+            // Cakar / duri di puncak
+            g.fillStyle = st.tip || st.bone;
+            g.beginPath(); g.moveTo(Wr.x - 0.05, Wr.y + 0.03); g.quadraticCurveTo(T.x - 0.06, T.y + 0.03, T.x, T.y); g.lineTo(Wr.x + 0.05, Wr.y + 0.02); g.closePath(); g.fill();
+        }
+
+        // Alpha dibulatkan (piksel tegas) + outline gelap 1 piksel di luar bentuk, seperti sprite Growtopia
+        function pixelize(c, outline) {
+            const g = c.getContext('2d');
+            const img = g.getImageData(0, 0, c.width, c.height), d = img.data, w = c.width, h = c.height;
+            for (let i = 3; i < d.length; i += 4) d[i] = d[i] > 110 ? 255 : 0;
+            const solid = i => d[i * 4 + 3] === 255;
+            const edge = [];
+            for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+                const i = y * w + x;
+                if (solid(i)) continue;
+                if ((x > 0 && solid(i - 1)) || (x < w - 1 && solid(i + 1)) || (y > 0 && solid(i - w)) || (y < h - 1 && solid(i + w))) edge.push(i);
+            }
+            edge.forEach(i => { d[i * 4] = outline[0]; d[i * 4 + 1] = outline[1]; d[i * 4 + 2] = outline[2]; d[i * 4 + 3] = 255; });
+            g.putImageData(img, 0, 0);
+        }
+
+        function buildWingSprite(st) {
+            const c = document.createElement('canvas');
+            c.width = WING_SPR_W; c.height = WING_SPR_H;
+            const g = c.getContext('2d');
+            g.save();
+            g.translate(WING_PAD, WING_PAD);
+            g.scale(WING_SPR_W - WING_PAD * 2, WING_SPR_H - WING_PAD * 2);
+            batWing(g, st);
+            g.restore();
+            pixelize(c, st.outline);
+            return c;
+        }
+        WINGS.forEach(st => { st.sprite = buildWingSprite(st); });
+        const wingRootPx = {
+            x: WING_PAD + WING_ROOT.x * (WING_SPR_W - WING_PAD * 2),
+            y: WING_PAD + WING_ROOT.y * (WING_SPR_H - WING_PAD * 2)
+        };
+
+        // Pangkal sayap di punggung atas (di bawah dagu, sumbu tengah badan), mengepak pelan.
+        // Badan orang digambar ulang di atas sayap (drawPersonOver), jadi sayap terlihat di BELAKANG badan.
+        function drawWings(fg, t, dt) {
+            const spr = WINGS[styleIdx.wings].sprite;
+            const ux = Math.cos(fg.angle), uy = Math.sin(fg.angle);
+            const target = {
+                x: fg.chin.x - uy * fg.head * CFG.WING_Y,
+                y: fg.chin.y + ux * fg.head * CFG.WING_Y,
+                a: fg.angle * 0.5, head: fg.head
+            };
+            // Posisi sayap dihaluskan per wajah: mengejar badan pelan-pelan, tidak menempel kaku ke landmark
+            const tr = fg.track;
+            if (!tr.wing) tr.wing = { ...target };
+            const f = 1 - Math.exp(-CFG.WING_FOLLOW * dt);
+            Object.keys(target).forEach(key => { tr.wing[key] += (target[key] - tr.wing[key]) * f; });
+            const wg = tr.wing;
+
+            const h = wg.head * CFG.WING_SCALE, k = h / spr.height, w = spr.width * k;
+            // Kepakan pelan: rotasi + bentang sayap sedikit melebar/menyempit dengan jeda (terasa lebih lentur)
+            const ph = t * CFG.WING_FLAP_SPEED + fg.id;
+            const flap = Math.sin(ph) * CFG.WING_FLAP;
+            const span = 1 + Math.sin(ph - 0.8) * 0.05;
+            const lift = Math.cos(ph) * wg.head * 0.02;
+            ctx.save();
+            ctx.imageSmoothingEnabled = false;
+            ctx.translate(wg.x, wg.y + lift); ctx.rotate(wg.a);
+            [-1, 1].forEach(s => {
+                ctx.save();
+                ctx.scale(s, 1);
+                ctx.translate(wg.head * CFG.WING_GAP, 0);
+                ctx.rotate(-flap);
+                ctx.scale(span, 2 - span);
+                ctx.drawImage(spr, -wingRootPx.x * k, -wingRootPx.y * k, w, h);
+                ctx.restore();
+            });
+            ctx.restore();
+        }
+
+        // ================== PERSON SEGMENTATION (badan di depan sayap) ==================
+        let segmenter = null, segLoading = false, segData = null, segW = 0, segH = 0;
+        const segInput = document.createElement('canvas');
+        const segInputCtx = segInput.getContext('2d');
+        const maskCanvas = document.createElement('canvas');
+        const maskCtx = maskCanvas.getContext('2d');
+        let maskImg = null;
+        const personCanvas = document.createElement('canvas');
+        const personCtx = personCanvas.getContext('2d');
+
+        // Model segmentasi baru dimuat saat sayap pertama kali dinyalakan
+        async function ensureSegmenter() {
+            if (segmenter || segLoading || !visionLib) return;
+            segLoading = true;
+            try {
+                segmenter = await visionLib.create(visionLib.ImageSegmenter, SEG_MODEL, { outputConfidenceMasks: true, outputCategoryMask: false });
+            } catch (e) {
+                console.error('Segmenter failed, wings will be drawn without body cut-out', e);
+                toast('WINGS: SEGMENTATION NOT AVAILABLE');
+            }
+            segLoading = false;
+        }
+
+        function runSegmentation(ts) {
+            const vw = video.videoWidth, vh = video.videoHeight;
+            const sw = CFG.SEG_WIDTH, sh = Math.round(sw * vh / vw);
+            if (segInput.width !== sw || segInput.height !== sh) { segInput.width = sw; segInput.height = sh; }
+            segInputCtx.drawImage(video, 0, 0, sw, sh);
+            try {
+                segmenter.segmentForVideo(segInput, ts, res => {
+                    const m = res.confidenceMasks && res.confidenceMasks[0];
+                    if (!m) return;
+                    const arr = m.getAsFloat32Array();
+                    if (!segData || segData.length !== arr.length) { segData = new Float32Array(arr); segW = m.width; segH = m.height; }
+                    else for (let i = 0; i < arr.length; i++) segData[i] += (arr[i] - segData[i]) * 0.7;   // redam kedip tepi
+                });
+            } catch (e) { console.warn(e); }
+        }
+
+        // Confidence -> alpha mask. Kalau nilai di tengah wajah rendah, berarti model mengeluarkan "background" -> dibalik.
+        function updateMask(faces) {
+            if (!segData) return false;
+            let invert = false;
+            if (faces.length) {
+                const v = screenToVideo({ x: faces[0].cx, y: faces[0].cy });
+                const mx = Math.min(segW - 1, Math.max(0, Math.round(v.x / video.videoWidth * segW)));
+                const my = Math.min(segH - 1, Math.max(0, Math.round(v.y / video.videoHeight * segH)));
+                invert = segData[my * segW + mx] < 0.5;
+            }
+            if (maskCanvas.width !== segW || maskCanvas.height !== segH || !maskImg) {
+                maskCanvas.width = segW; maskCanvas.height = segH;
+                maskImg = maskCtx.createImageData(segW, segH);
+            }
+            const d = maskImg.data;
+            for (let i = 0; i < segData.length; i++) {
+                const v = invert ? 1 - segData[i] : segData[i];
+                d[i * 4 + 3] = Math.max(0, Math.min(255, (v - 0.35) * 850));
+            }
+            maskCtx.putImageData(maskImg, 0, 0);
+            return true;
+        }
+
+        // Gambar ulang piksel orang (video x mask) di atas sayap
+        function drawPersonOver(faces) {
+            if (!updateMask(faces)) return;
+            if (personCanvas.width !== canvas.width || personCanvas.height !== canvas.height) {
+                personCanvas.width = canvas.width; personCanvas.height = canvas.height;
+            }
+            const p = personCtx;
+            p.setTransform(1, 0, 0, 1, 0, 0);
+            p.globalCompositeOperation = 'source-over';
+            p.clearRect(0, 0, personCanvas.width, personCanvas.height);
+            p.setTransform(dpr, 0, 0, dpr, 0, 0);
+            p.translate(W, 0); p.scale(-1, 1);
+            p.imageSmoothingEnabled = true;
+            p.drawImage(maskCanvas, layout.ox, layout.oy, layout.dw, layout.dh);
+            p.globalCompositeOperation = 'source-in';
+            p.drawImage(video, layout.ox, layout.oy, layout.dw, layout.dh);
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.drawImage(personCanvas, 0, 0);
+            ctx.restore();
+        }
+
+        function drawSkeletons() {
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,106,213,0.45)'; ctx.lineWidth = 1.5;
+            hands.forEach(h => {
+                ctx.beginPath();
+                CONNECTIONS.forEach(([a, b]) => { ctx.moveTo(h.p[a].x, h.p[a].y); ctx.lineTo(h.p[b].x, h.p[b].y); });
+                ctx.stroke();
+                ctx.fillStyle = '#fff';
+                h.p.forEach(q => ctx.fillRect(q.x - 2, q.y - 2, 4, 4));
+            });
+            ctx.restore();
+        }
+
+        function drawHUDCircle(x, y, progress, color) {
+            ctx.save();
+            ctx.shadowBlur = 10; ctx.shadowColor = color;
+            ctx.beginPath();
+            ctx.arc(x, y, 35, -Math.PI / 2, (-Math.PI / 2) + (Math.PI * 2 * progress));
+            ctx.lineWidth = 5; ctx.strokeStyle = color; ctx.stroke();
+            ctx.setLineDash([3, 5]);
+            ctx.beginPath(); ctx.arc(x, y, 30, 0, Math.PI * 2); ctx.lineWidth = 1; ctx.stroke();
+            ctx.restore();
+        }
+
+        // ================== UI ==================
+        let toastTimer = null;
+        // Panel status sudah dihapus; pesan (termasuk error) tampil lewat toast. ms = lama tampil
+        function toast(msg, ms = 1600) {
+            toastEl.textContent = msg;
+            toastEl.classList.add('show');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toastEl.classList.remove('show'), ms);
+        }
+
+        // ================== LAYOUT (DIGIFEST CAMP kiri atas + GROWTOPIA kanan bawah) ==================
+        // Satu PNG layout seukuran frame (contoh 1024x570): logo kiri atas ada di kuadran kiri atas,
+        // logo kanan bawah ada di kuadran kanan bawah. Tiap kuadran ditempel ke pojoknya sendiri,
+        // jadi layout tetap pas di layar dengan rasio apa pun dan tidak ada logo yang terpotong.
+        const layoutArt = { img: null, w: 0, h: 0 };
+
+        // PNG tanpa transparansi (latar putih): buang putih yang tersambung ke tepi gambar (flood fill),
+        // putih di dalam logo tetap utuh. Kalau piksel tidak bisa dibaca (halaman dibuka dari file://), gambar dipakai apa adanya.
+        function keyOutWhite(img) {
+            const w = img.naturalWidth, h = img.naturalHeight;
+            const c = document.createElement('canvas'); c.width = w; c.height = h;
+            const g = c.getContext('2d');
+            g.drawImage(img, 0, 0);
+            let data;
+            try { data = g.getImageData(0, 0, w, h); }
+            catch (e) { console.warn('Layout: pixel read blocked, white background kept. Run from a web server.', e); return img; }
+            const d = data.data;
+            const opaqueCorners = [0, w - 1, (h - 1) * w, h * w - 1].every(i => d[i * 4 + 3] === 255);
+            if (!opaqueCorners) return img;             // PNG sudah transparan
+            const T = CFG.LAYOUT_WHITE;
+            const white = i => d[i * 4] > T && d[i * 4 + 1] > T && d[i * 4 + 2] > T;
+            const seen = new Uint8Array(w * h), stack = [];
+            const push = i => { if (!seen[i] && white(i)) { seen[i] = 1; stack.push(i); } };
+            for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+            for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+            while (stack.length) {
+                const i = stack.pop(), x = i % w;
+                d[i * 4 + 3] = 0;
+                if (x > 0) push(i - 1);
+                if (x < w - 1) push(i + 1);
+                if (i >= w) push(i - w);
+                if (i < w * (h - 1)) push(i + w);
+            }
+            g.putImageData(data, 0, 0);
+            return c;
+        }
+
+        (function loadLayout() {
+            const img = new Image();
+            img.onload = () => {
+                layoutArt.img = keyOutWhite(img);
+                layoutArt.w = img.naturalWidth; layoutArt.h = img.naturalHeight;
+            };
+            img.onerror = () => { console.warn(`Layout not found: ${CFG.LAYOUT_SRC}`); toast(`LAYOUT NOT FOUND: ${CFG.LAYOUT_SRC}`, 8000); };
+            img.src = CFG.LAYOUT_SRC;
+        })();
+
+        // c sudah dalam satuan piksel CSS (w x h)
+        function drawLayout(c, w, h) {
+            const L = layoutArt;
+            if (!L.img) return;
+            const k = Math.min(w / L.w, h / L.h) * CFG.LAYOUT_SCALE;
+            const hw = L.w / 2, hh = L.h / 2;
+            c.save();
+            c.imageSmoothingEnabled = true;
+            c.drawImage(L.img, 0, 0, hw, hh, 0, 0, hw * k, hh * k);                                  // kiri atas
+            c.drawImage(L.img, hw, hh, L.w - hw, L.h - hh, w - (L.w - hw) * k, h - (L.h - hh) * k,   // kanan bawah
+                (L.w - hw) * k, (L.h - hh) * k);
+            c.restore();
+        }
+
+        // ================== PHOTO CAPTURE + UPLOAD + QR ==================
+        const APP = Object.assign({ SUPABASE_URL: '', SUPABASE_ANON_KEY: '', BUCKET: 'fog-glass', FOLDER: 'filter-photos', VIEWER_URL: '' }, window.FILTER_SYNC_CONFIG || {});
+        const supa = (APP.SUPABASE_URL && APP.SUPABASE_ANON_KEY && window.supabase)
+            ? window.supabase.createClient(APP.SUPABASE_URL, APP.SUPABASE_ANON_KEY, { auth: { persistSession: false } })
+            : null;
+
+        const countdownEl = document.getElementById('countdown');
+        const flashEl = document.getElementById('flash');
+        const modalEl = document.getElementById('photo_modal');
+        const previewEl = document.getElementById('photo_preview');
+        const qrBox = document.getElementById('qr_box');
+        const uploadStatusEl = document.getElementById('upload_status');
+        const saveLocalEl = document.getElementById('save_local');
+        const modalTimerEl = document.getElementById('modal_timer');
+        const closeBtn = document.getElementById('close_modal');
+
+        // Canvas foto: salinan layar (video + filter + layout) TANPA skeleton / ring HUD
+        const photoCanvas = document.createElement('canvas');
+        const photoCtx = photoCanvas.getContext('2d');
+
+        let capState = 'idle';          // idle | countdown | snap | saving | modal
+        let countdownTimer = null, modalTimer = null, photoUrl = null;
+
+        function canCapture() { return capState === 'idle' && !!video.videoWidth; }
+        const pad2 = n => String(n).padStart(2, '0');
+
+        function randomId() {
+            if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+            const b = crypto.getRandomValues(new Uint8Array(16));
+            return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+        }
+
+        function startCountdown() {
+            if (!canCapture()) return;
+            capState = 'countdown';
+            let n = CFG.COUNTDOWN;
+            countdownEl.style.display = 'flex';
+            countdownEl.textContent = n;
+            countdownTimer = setInterval(() => {
+                n--;
+                if (n > 0) { countdownEl.textContent = n; return; }
+                clearInterval(countdownTimer);
+                countdownEl.style.display = 'none';
+                countdownEl.textContent = '';
+                capState = 'snap';              // foto diambil di frame() berikutnya
+            }, 1000);
+        }
+
+        // Dipanggil dari frame() setelah layout digambar, sebelum skeleton / ring HUD -> foto bersih
+        function takePhoto() {
+            capState = 'saving';
+            const s = Math.min(1, CFG.PHOTO_LONG_SIDE / Math.max(canvas.width, canvas.height));
+            photoCanvas.width = Math.round(canvas.width * s);
+            photoCanvas.height = Math.round(canvas.height * s);
+            photoCtx.drawImage(canvas, 0, 0, photoCanvas.width, photoCanvas.height);
+            flashEl.classList.remove('on'); void flashEl.offsetWidth; flashEl.classList.add('on');
+            const d = new Date();
+            photoCanvas.toBlob(blob => {
+                if (!blob) { toast('PHOTO FAILED'); capState = 'idle'; return; }
+                const fileName = `filter-sync-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}.jpg`;
+                showModal(blob, fileName);
+                uploadPhoto(blob, d);
+            }, 'image/jpeg', CFG.PHOTO_QUALITY);
+        }
+
+        function showModal(blob, fileName) {
+            capState = 'modal';
+            if (photoUrl) URL.revokeObjectURL(photoUrl);
+            photoUrl = URL.createObjectURL(blob);
+            previewEl.src = photoUrl;
+            saveLocalEl.href = photoUrl;
+            saveLocalEl.download = fileName;
+            qrBox.textContent = 'GENERATING...';
+            uploadStatusEl.textContent = 'UPLOADING...';
+            modalEl.classList.add('open');
+            closeBtn.focus();
+            let left = CFG.MODAL_TIMEOUT;
+            modalTimerEl.textContent = `AUTO-CLOSE IN ${left}s`;
+            clearInterval(modalTimer);
+            modalTimer = setInterval(() => {
+                left--;
+                modalTimerEl.textContent = `AUTO-CLOSE IN ${left}s`;
+                if (left <= 0) closeModal();
+            }, 1000);
+        }
+
+        function closeModal() {
+            clearInterval(modalTimer);
+            modalEl.classList.remove('open');
+            capState = 'idle';
+        }
+
+        // VIEWER_URL dari config.js, atau photo.html di folder yang sama dengan halaman ini
+        function viewerBase() { return APP.VIEWER_URL || new URL('photo.html', location.href).href; }
+        function isLocalViewer(u) { return u.protocol === 'file:' || ['localhost', '127.0.0.1', '[::1]', '::1'].includes(u.hostname); }
+
+        async function uploadPhoto(blob, d) {
+            if (!supa) {
+                qrBox.textContent = 'SUPABASE NOT CONFIGURED';
+                uploadStatusEl.textContent = 'Isi config.js untuk QR. Gunakan SAVE LOCAL.';
+                return;
+            }
+            const day = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+            const path = `${APP.FOLDER}/${day}/${randomId()}.jpg`;
+            try {
+                const { error } = await supa.storage.from(APP.BUCKET).upload(path, blob, {
+                    contentType: 'image/jpeg', cacheControl: '3600', upsert: false
+                });
+                if (error) throw error;
+                if (capState !== 'modal') return;          // modal sudah ditutup
+                const viewer = new URL(viewerBase());
+                viewer.searchParams.set('p', path);
+                renderQR(viewer.href);
+                console.info('Viewer:', viewer.href);
+                uploadStatusEl.textContent = isLocalViewer(viewer)
+                    ? 'WARNING: photo.html masih di localhost/file, HP tidak bisa membukanya. Isi VIEWER_URL di config.js.'
+                    : 'SCAN TO SAVE / SHARE';
+            } catch (err) {
+                console.error('Upload failed:', err);
+                qrBox.textContent = 'UPLOAD FAILED';
+                const msg = err.message || String(err);
+                uploadStatusEl.textContent = /mime|size|policy|security/i.test(msg)
+                    ? `ERROR: ${msg}. Sudah jalankan supabase-photo-setup.sql?`
+                    : `ERROR: ${msg}`;
+            }
+        }
+
+        function renderQR(url) {
+            const qr = qrcode(0, 'M');
+            qr.addData(url);
+            qr.make();
+            const img = new Image();
+            img.src = qr.createDataURL(8, 2);
+            img.alt = 'QR code to save or share the photo';
+            qrBox.replaceChildren(img);
+        }
+
+        closeBtn.addEventListener('click', closeModal);
+
+        // ================== CAMERA + MEDIAPIPE TASKS ==================
+        let handLandmarker = null, faceLandmarker = null, farLandmarker = null, farCount = 0;
+        let visionLib = null;           // { create, ImageSegmenter } untuk model yang dimuat belakangan
+        let lastVideoTime = -1, lastVisionTs = 0, visionTick = 0;
+
+        async function startCamera() {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: { ideal: CFG.CAMERA_W }, height: { ideal: CFG.CAMERA_H }, facingMode: 'user' }, audio: false
+            });
+            video.srcObject = stream;
+            await video.play();
+        }
+
+        async function initVision() {
+            const { FilesetResolver, HandLandmarker, FaceLandmarker, ImageSegmenter } = await import(`${VISION_URL}/vision_bundle.mjs`);
+            const fileset = await FilesetResolver.forVisionTasks(`${VISION_URL}/wasm`);
+            const create = async (Task, modelAssetPath, options) => {
+                try {
+                    return await Task.createFromOptions(fileset, { baseOptions: { modelAssetPath, delegate: 'GPU' }, runningMode: 'VIDEO', ...options });
+                } catch (e) {
+                    console.warn('GPU delegate failed, falling back to CPU', e);
+                    return await Task.createFromOptions(fileset, { baseOptions: { modelAssetPath, delegate: 'CPU' }, runningMode: 'VIDEO', ...options });
+                }
+            };
+            visionLib = { create, ImageSegmenter };
+            if (active.wings) ensureSegmenter();   // sayap sudah dinyalakan (keyboard) sebelum model siap
+            handLandmarker = await create(HandLandmarker, HAND_MODEL, {
+                numHands: CFG.MAX_HANDS, minHandDetectionConfidence: 0.55, minHandPresenceConfidence: 0.55, minTrackingConfidence: 0.55
+            });
+            // Confidence lebih rendah supaya wajah yang agak jauh / kecil tetap terdeteksi
+            faceLandmarker = await create(FaceLandmarker, FACE_MODEL, {
+                numFaces: CFG.MAX_FACES, minFaceDetectionConfidence: 0.35, minFacePresenceConfidence: 0.35, minTrackingConfidence: 0.35
+            });
+            // Landmarker kedua (mode IMAGE) khusus untuk potongan video yang di-zoom (wajah jauh)
+            if (CFG.FAR_DETECTION) {
+                try {
+                    farLandmarker = await create(FaceLandmarker, FACE_MODEL, {
+                        runningMode: 'IMAGE', numFaces: 4, minFaceDetectionConfidence: 0.4, minFacePresenceConfidence: 0.4
+                    });
+                } catch (e) {
+                    console.error('Far-face landmarker failed, only near faces will be detected', e);
+                }
+            }
+        }
+
+        // Tangan tiap frame video baru, wajah full frame tiap 2 frame, potongan zoom tiap frame
+        function runVision(now) {
+            if (!handLandmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+            lastVideoTime = video.currentTime;
+            const ts = Math.max(now, lastVisionTs + 1);
+            lastVisionTs = ts;
+            updateHands(handLandmarker.detectForVideo(video, ts));
+            if (segmenter && active.wings) runSegmentation(ts);
+            if (faceLandmarker && (++visionTick % 2 === 0)) {
+                const r = faceLandmarker.detectForVideo(video, ts);
+                updateFaces((r && r.faceLandmarks) || [], 'full');
+            }
+            if (farLandmarker) runFarCrops();
+            adaptBudget(performance.now() - now);
+        }
+
+        // Jumlah crop per frame menyesuaikan beban: kalau deteksi > budget, kurangi; kalau ringan, tambah lagi
+        let cropBudget = CFG.CROPS_PER_FRAME, visionMs = 0, budgetCooldown = 0;
+        function adaptBudget(ms) {
+            visionMs = visionMs ? visionMs * 0.9 + ms * 0.1 : ms;
+            if (--budgetCooldown > 0) return;
+            if (visionMs > CFG.VISION_BUDGET_MS && cropBudget > 1) { cropBudget--; budgetCooldown = 30; }
+            else if (visionMs < CFG.VISION_BUDGET_MS * 0.6 && cropBudget < CFG.CROPS_PER_FRAME) { cropBudget++; budgetCooldown = 30; }
+        }
+
+        // ================== FAR FACE DETECTION (zoom crop) ==================
+        // Detektor wajah MediaPipe hanya untuk jarak dekat; wajah jauh terlalu kecil di full frame.
+        // 1. SCAN: frame dibagi beberapa tile persegi yang saling tumpang tindih, lalu di-zoom
+        //    (1 tile per frame, bergiliran) untuk menemukan wajah jauh yang baru.
+        // 2. TRACK: wajah yang tidak terlihat oleh deteksi full frame dilacak lewat crop zoom di sekitar wajahnya.
+        const cropCanvas = document.createElement('canvas');
+        const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: false });
+        let scanIdx = 0, trackIdx = 0;
+
+        // Tile persegi multi-skala, overlap 25% (wajah di batas tile tetap utuh di tile tetangga).
+        // Urutan diselang-seling antar skala supaya kedua skala ter-scan merata. Di-cache per resolusi video.
+        let tileCache = { key: '', tiles: [] };
+        function scanTiles() {
+            const vw = video.videoWidth, vh = video.videoHeight, key = `${vw}x${vh}`;
+            if (tileCache.key === key) return tileCache.tiles;
+            const perScale = CFG.SCAN_TILES.map(frac => {
+                const ts = Math.round(Math.min(vh, vw * frac));
+                const steps = len => {
+                    if (len <= ts) return [0];
+                    const n = Math.ceil((len - ts) / (ts * 0.75)) + 1;
+                    return Array.from({ length: n }, (_, i) => Math.round(i * (len - ts) / (n - 1)));
+                };
+                const list = [];
+                steps(vh).forEach(sy => steps(vw).forEach(sx => list.push({ sx, sy, sw: ts, sh: ts })));
+                return list;
+            });
+            const tiles = [];
+            for (let i = 0; i < Math.max(...perScale.map(l => l.length)); i++) perScale.forEach(l => { if (l[i]) tiles.push(l[i]); });
+            tileCache = { key, tiles };
+            return tiles;
+        }
+
+        // Koordinat layar -> koordinat piksel video asli (kebalikan toScreen)
+        function screenToVideo(p) {
+            return {
+                x: (W - p.x - layout.ox) / layout.dw * video.videoWidth,
+                y: (p.y - layout.oy) / layout.dh * video.videoHeight
+            };
+        }
+
+        function trackCrop(t) {
+            const vw = video.videoWidth, vh = video.videoHeight;
+            const c = screenToVideo(mid(t.pts.eL, t.pts.eR));
+            const fw = D(t.pts.sL, t.pts.sR) / layout.dw * vw;          // lebar wajah dalam piksel video
+            const s = Math.round(Math.min(Math.min(vw, vh), Math.max(160, fw * CFG.FAR_TRACK_ZOOM)));
+            const sx = Math.min(vw - s, Math.max(0, Math.round(c.x - s / 2)));
+            const sy = Math.min(vh - s, Math.max(0, Math.round(c.y - s * 0.42)));   // sedikit ke atas: sisakan ruang dahi/rambut
+            return { sx, sy, sw: s, sh: s };
+        }
+
+        function detectCrop(crop) {
+            const vw = video.videoWidth, vh = video.videoHeight, C = CFG.CROP_SIZE;
+            cropCanvas.width = C; cropCanvas.height = C;
+            cropCtx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, C, C);
+            let res;
+            try { res = farLandmarker.detect(cropCanvas); } catch (e) { console.warn(e); return; }
+            const list = [];
+            ((res && res.faceLandmarks) || []).forEach(lm => {
+                // Tolak wajah yang terpotong tepi crop (landmark-nya tidak akurat), kecuali tepi itu memang tepi video
+                let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+                lm.forEach(p => { if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x; if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; });
+                const m = 0.02;
+                if ((x0 < m && crop.sx > 0) || (y0 < m && crop.sy > 0) ||
+                    (x1 > 1 - m && crop.sx + crop.sw < vw) || (y1 > 1 - m && crop.sy + crop.sh < vh)) return;
+                // Koordinat crop -> koordinat ternormalisasi full video
+                list.push(lm.map(p => ({ x: (crop.sx + p.x * crop.sw) / vw, y: (crop.sy + p.y * crop.sh) / vh })));
+            });
+            updateFaces(list, 'crop');
+        }
+
+        function runFarCrops() {
+            const now = performance.now();
+            // Wajah yang tidak terlihat oleh deteksi full frame selama > 300 ms = wajah jauh
+            const far = faceTracks.filter(t => now - t.time <= CFG.FACE_TIMEOUT && now - (t.fullTime || 0) > 300);
+            farCount = far.length;
+            const n = cropBudget;
+            const tiles = scanTiles();
+            for (let i = 0; i < n; i++) {
+                // Selalu sisakan slot scan supaya wajah jauh yang baru tetap ditemukan
+                const scanSlot = !far.length || (n === 1 ? visionTick % 2 === 1 : i === n - 1);
+                detectCrop(scanSlot ? tiles[scanIdx++ % tiles.length] : trackCrop(far[trackIdx++ % far.length]));
+            }
+        }
+
+        // ================== MAIN LOOP ==================
+        let lastFrame = performance.now();
+        function frame(now) {
+            requestAnimationFrame(frame);
+            const dtMs = Math.min(50, now - lastFrame);
+            lastFrame = now;
+            const dt = dtMs / 1000, t = now / 1000;
+            if (!video.videoWidth) return;
+
+            computeLayout();
+            runVision(now);
+            const faces = faceGeoms();
+            const g = detectGesture(faces);
+            processGesture(g, dtMs);
+            updatePartyAnchor(faces);
+            // Selama sign F / DigiFest masih ditahan, tulisan tetap tampil
+            if (g && (g.type === 'binus' || g.type === 'digifest') && gest.latched === g.type) party.until = Math.max(party.until, now + 1500);
+            // Selama rock sign ditahan, jaring ikut tangan dan tetap tampil
+            if (g && g.type === 'spider' && gest.latched === 'spider') {
+                web.until = Math.max(web.until, now + 1200);
+                web.x += (g.x - web.x) * 0.35; web.y += (g.y - web.y) * 0.35;
+            }
+            const partyOn = now < party.until + CFG.PARTY_FADE;
+
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.save();
+            ctx.translate(W, 0); ctx.scale(-1, 1);
+            ctx.drawImage(video, layout.ox, layout.oy, layout.dw, layout.dh);
+            ctx.restore();
+
+            // Aksesoris dipasang ke SEMUA wajah yang terdeteksi
+            // Sayap dulu, lalu badan orang digambar ulang di atasnya -> sayap di belakang badan
+            if (active.wings && faces.length) {
+                faces.forEach(fg => drawWings(fg, t, dt));
+                if (segmenter) drawPersonOver(faces);
+            }
+            faces.forEach(fg => {
+                if (active.hearts) { spawnHearts(fg, dt); drawEyeHearts(fg, t); }
+                if (active.glasses) drawGlasses(fg, t);
+            });
+            updateDrawHearts(dt);
+            if (now < web.until + CFG.WEB_FADE) drawWeb(now);
+            if (partyOn) drawPartyText(now);
+            updateDrawConfetti(dt, party.confetti && now < party.until);
+
+            // Layout logo selalu tampil; foto diambil SEBELUM skeleton / ring HUD, jadi fotonya bersih
+            drawLayout(ctx, W, H);
+            if (capState === 'snap') takePhoto();
+
+            if (showSkeleton) drawSkeletons();
+            if (g && gest.hold === g.type) drawHUDCircle(g.x, g.y, Math.min(1, gest.time / holdNeeded(g.type)), GESTURE_COLOR[g.type]);
+        }
+
+        // ================== EVENTS / BOOT ==================
+        let resizeTimer = null;
+        window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 150); });
+        window.addEventListener('keydown', e => {
+            const k = e.key.toLowerCase();
+            if (k === 'escape') { if (capState === 'modal') closeModal(); return; }
+            if (capState === 'modal') return;
+            if (k === 'v') startCountdown();
+            else if (k === '1') fire('glasses');
+            else if (k === '2') fire('hearts');
+            else if (k === '3') fire('wings');
+            else if (k === 's') fire('spider');
+            else if (k === 'd') fire('digifest');
+            else if (k === 'b') fire('binus');
+            else if (e.key === 'ArrowRight') cycleStyle(1);
+            else if (e.key === 'ArrowLeft') cycleStyle(-1);
+            else if (k === 'h') showSkeleton = !showSkeleton;
+            else if (k === 'x') resetAll();
+        });
+
+        resize();
+        requestAnimationFrame(frame);
+        startCamera().catch(err => { console.error(err); toast('CAMERA_ERROR: ' + err.message, 15000); });
+        initVision().catch(err => { console.error(err); toast('VISION_ERROR: ' + err.message, 15000); });
+    </script>
+</body>
+</html>
